@@ -79,11 +79,10 @@ function extractBody(payload: gmail_v1.Schema$MessagePart | undefined): string {
   return '';
 }
 
-export async function markAsRead(messageId: string): Promise<void> {
+export async function deleteMessage(messageId: string): Promise<void> {
   const gmail = getGmail();
-  await gmail.users.messages.modify({
+  await gmail.users.messages.trash({
     userId: 'me',
     id: messageId,
-    requestBody: { removeLabelIds: ['UNREAD'] },
   });
 }

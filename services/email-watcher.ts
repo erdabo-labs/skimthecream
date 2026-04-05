@@ -1,4 +1,4 @@
-import { fetchUnreadAlerts, markAsRead } from './gmail/client';
+import { fetchUnreadAlerts, deleteMessage } from './gmail/client';
 import { parseWithFallback } from './gmail/parsers';
 import { createServiceClient } from '../lib/supabase/service';
 import { findCategory } from '../lib/constants';
@@ -9,7 +9,7 @@ const supabase = createServiceClient();
 async function processAlerts(): Promise<void> {
   console.log(`[${new Date().toISOString()}] Polling for new alerts...`);
 
-  const emails = await fetchUnreadAlerts('is:unread (from:marketplace OR from:ksl)');
+  const emails = await fetchUnreadAlerts('is:unread from:erdabo@gmail.com');
 
   if (emails.length === 0) {
     return;
@@ -44,7 +44,7 @@ async function processAlerts(): Promise<void> {
         }
       }
 
-      await markAsRead(email.id);
+      await deleteMessage(email.id);
       console.log(`Processed email: ${email.subject} (${listings.length} listings)`);
     } catch (err) {
       console.error(`Error processing email ${email.id}:`, err);
