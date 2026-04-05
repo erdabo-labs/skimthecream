@@ -9,7 +9,7 @@ const supabase = createServiceClient();
 async function processAlerts(): Promise<void> {
   console.log(`[${new Date().toISOString()}] Polling for new alerts...`);
 
-  const emails = await fetchUnreadAlerts('is:unread from:erdabo@gmail.com');
+  const emails = await fetchUnreadAlerts('is:unread {from:erdabo@gmail.com from:classifieds@ksl.com from:notification@facebookmail.com}');
 
   if (emails.length === 0) {
     return;
