@@ -8,12 +8,25 @@ const supabase = createServiceClient();
 
 /**
  * Use AI to extract a normalized product name from a listing title.
- * e.g. "2017 MacBook Air 13" W/Box Charger" → "MacBook Air 2017 13"
+ * Must distinguish between models precisely — iPhone 13 Mini ≠ iPhone 13 Pro Max.
  */
 async function normalizeProduct(title: string): Promise<string | null> {
-  const prompt = `Extract the core product from this listing title. Remove seller fluff, accessories mentioned, and condition words. Return ONLY the normalized product name (brand + model + key spec like size/gen/year). If it's not a recognizable product, return "unknown".
+  const prompt = `Normalize this listing title into a canonical product name for price comparison.
 
-Title: "${title}"`;
+RULES:
+- Include brand, full model name, and key variant (size, storage, generation)
+- For phones: ALWAYS include the EXACT model tier (Mini, Pro, Pro Max, Plus, e, etc.) and storage (64GB, 128GB, 256GB)
+- For laptops: include screen size, year, and chip/processor if mentioned
+- For tablets: include generation, screen size, storage, WiFi/Cellular
+- Remove: seller descriptions, condition words (mint, like new), accessories (w/box, charger), "unlocked" status
+- Format consistently: "Brand Model Variant Storage" e.g. "iPhone 13 Pro Max 128GB" or "MacBook Air 13 2017"
+- If storage/capacity is not mentioned, omit it — don't guess
+- Two listings of the SAME product at different prices must normalize to the SAME string
+- Return "unknown" if you can't identify a specific product
+
+Title: "${title}"
+
+Return ONLY the normalized name, nothing else.`;
 
   try {
     const result = await parseWithAI(prompt);
@@ -70,41 +83,147 @@ function computeMarketValue(
 }
 
 /**
- * Look at all previous listings we've seen for similar products
+ * Look at previous listings for the SAME normalized product
  * and compute the median asking price as our market reference.
+ * Falls back to category-wide median only if product-level data is thin.
  */
 async function getMarketPrice(
   productName: string,
   category: string | null
 ): Promise<{ median: number; count: number } | null> {
-  // Query all listings with asking prices in the same category
-  let query = supabase
+  // First try: exact product match from market_prices table
+  const { data: productPrices } = await supabase
+    .from('stc_market_prices')
+    .select('avg_sold_price, sample_size')
+    .eq('product_name', productName)
+    .eq('source', 'observed')
+    .not('avg_sold_price', 'is', null)
+    .limit(1);
+
+  if (productPrices && productPrices.length > 0 && productPrices[0].sample_size >= 2) {
+    return { median: productPrices[0].avg_sold_price, count: productPrices[0].sample_size };
+  }
+
+  // Second try: match listings with the same parsed_product
+  const { data: exactListings } = await supabase
     .from('stc_listings')
     .select('asking_price')
+    .eq('parsed_product', productName)
     .not('asking_price', 'is', null)
     .gt('asking_price', 0);
 
-  if (category) {
-    query = query.eq('parsed_category', category);
+  if (exactListings && exactListings.length >= 2) {
+    const prices = exactListings.map((d) => d.asking_price as number).sort((a, b) => a - b);
+    const mid = Math.floor(prices.length / 2);
+    const median = prices.length % 2 === 0 ? (prices[mid - 1] + prices[mid]) / 2 : prices[mid];
+    return { median, count: prices.length };
   }
 
-  const { data } = await query;
+  // Third try: use AI to find similar products in the same category
+  // by querying listings and asking the AI which are comparable
+  if (category) {
+    const { data: categoryListings } = await supabase
+      .from('stc_listings')
+      .select('parsed_product, asking_price')
+      .eq('parsed_category', category)
+      .not('asking_price', 'is', null)
+      .not('parsed_product', 'is', null)
+      .gt('asking_price', 0);
 
-  if (!data || data.length < 2) return null;
+    if (categoryListings && categoryListings.length >= 3) {
+      // Ask AI which products are comparable
+      const uniqueProducts = [...new Set(categoryListings.map(l => l.parsed_product))];
+      if (uniqueProducts.length > 1) {
+        try {
+          const similarProducts = await findSimilarProducts(productName, uniqueProducts as string[]);
+          if (similarProducts.length > 0) {
+            const prices = categoryListings
+              .filter(l => similarProducts.includes(l.parsed_product as string))
+              .map(l => l.asking_price as number)
+              .sort((a, b) => a - b);
 
-  // Use AI to find which of these are the same product
-  // For now, just use category median — as we collect more data this gets better
-  const prices = data
-    .map((d) => d.asking_price as number)
-    .sort((a, b) => a - b);
+            if (prices.length >= 2) {
+              const mid = Math.floor(prices.length / 2);
+              const median = prices.length % 2 === 0 ? (prices[mid - 1] + prices[mid]) / 2 : prices[mid];
+              return { median, count: prices.length };
+            }
+          }
+        } catch {
+          // AI comparison failed, skip
+        }
+      }
+    }
+  }
 
-  const mid = Math.floor(prices.length / 2);
-  const median =
-    prices.length % 2 === 0
-      ? (prices[mid - 1] + prices[mid]) / 2
-      : prices[mid];
+  return null;
+}
 
-  return { median, count: prices.length };
+/**
+ * Ask AI which products from our database are comparable to the target product.
+ * e.g. "iPhone 13 Pro 128GB" is comparable to "iPhone 13 Pro 256GB" but NOT to "iPhone 13 Mini 128GB"
+ */
+async function findSimilarProducts(target: string, candidates: string[]): Promise<string[]> {
+  // First pass: quick string-based filtering to avoid wasting AI calls
+  // Only consider candidates that share the base model
+  const preFiltered = candidates.filter(c => {
+    const targetLower = target.toLowerCase();
+    const candidateLower = c.toLowerCase();
+    // Must not be the same string
+    if (targetLower === candidateLower) return true;
+    // Quick reject: if one says "pro max" and the other doesn't, they're different
+    const targetHasProMax = targetLower.includes('pro max');
+    const candidateHasProMax = candidateLower.includes('pro max');
+    if (targetHasProMax !== candidateHasProMax) return false;
+    // Quick reject: if one says "mini" and the other doesn't
+    const targetHasMini = targetLower.includes('mini');
+    const candidateHasMini = candidateLower.includes('mini');
+    if (targetHasMini !== candidateHasMini) return false;
+    // Quick reject: if one says "plus" and the other doesn't
+    const targetHasPlus = targetLower.includes('plus');
+    const candidateHasPlus = candidateLower.includes('plus');
+    if (targetHasPlus !== candidateHasPlus) return false;
+    // Quick reject: "pro" vs non-"pro" (but only if not already pro max)
+    if (!targetHasProMax && !candidateHasProMax) {
+      const targetHasPro = targetLower.includes(' pro');
+      const candidateHasPro = candidateLower.includes(' pro');
+      if (targetHasPro !== candidateHasPro) return false;
+    }
+    // Quick reject: "air" vs non-"air"
+    const targetHasAir = targetLower.includes('air');
+    const candidateHasAir = candidateLower.includes('air');
+    if (targetHasAir !== candidateHasAir) return false;
+    return true;
+  });
+
+  if (preFiltered.length === 0) return [];
+  if (preFiltered.length === 1 && preFiltered[0].toLowerCase() === target.toLowerCase()) return preFiltered;
+
+  const prompt = `Given a target product, identify which candidates are the EXACT SAME product model. Only storage size differences are acceptable.
+
+CRITICAL RULES — these are DIFFERENT products, NEVER group them:
+- "iPhone 13 Pro" ≠ "iPhone 13 Pro Max" (Pro Max is a bigger, more expensive phone)
+- "iPhone 13 Pro" ≠ "iPhone 13" (base model vs Pro)
+- "iPhone 13" ≠ "iPhone 13 Mini" (different size)
+- "iPhone 15 Pro" ≠ "iPhone 16 Pro" (different generation)
+- "MacBook Pro" ≠ "MacBook Air" (different product line)
+- "iPad Pro 12.9" ≠ "iPad Pro 11" (different screen size)
+
+SAME product (OK to group):
+- "iPhone 13 Pro 128GB" ≈ "iPhone 13 Pro 256GB" (only storage differs)
+- "MacBook Air 13 2020" ≈ "MacBook Air 13 2020 M1" (same model, spec clarification)
+
+Target: "${target}"
+Candidates: ${JSON.stringify(preFiltered)}
+
+Return ONLY a JSON array of matching candidate strings. Empty array [] if none match.`;
+
+  try {
+    const result = await parseWithAI(prompt);
+    const cleaned = result.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
+    return JSON.parse(cleaned);
+  } catch {
+    return [];
+  }
 }
 
 /**
