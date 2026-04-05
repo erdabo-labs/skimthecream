@@ -10,19 +10,21 @@ export async function sendAlert(
     return;
   }
 
-  const headers: Record<string, string> = {
-    Title: title,
-    Priority: String(priority),
+  const payload: Record<string, unknown> = {
+    topic,
+    title,
+    message: body,
+    priority,
   };
 
   if (clickUrl) {
-    headers['Click'] = clickUrl;
+    payload.click = clickUrl;
   }
 
-  const res = await fetch(`https://ntfy.sh/${topic}`, {
+  const res = await fetch('https://ntfy.sh', {
     method: 'POST',
-    headers,
-    body,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
