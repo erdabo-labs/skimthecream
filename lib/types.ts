@@ -56,6 +56,17 @@ export interface InventoryItem {
   updated_at: string;
 }
 
+export interface Category {
+  id: number;
+  slug: string;
+  name: string;
+  keywords: string[];
+  avg_days_to_sell: number;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export type NegotiationStatus = 'active' | 'closed' | 'purchased';
 
 export interface NegotiationMessage {

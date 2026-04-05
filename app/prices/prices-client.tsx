@@ -39,6 +39,7 @@ export function PricesClient({ prices: initial }: { prices: MarketPrice[] }) {
       .update({
         avg_sold_price: newPrice,
         manual_override: true,
+        source: 'manual',
         updated_at: new Date().toISOString(),
       })
       .eq('id', id);
@@ -46,7 +47,7 @@ export function PricesClient({ prices: initial }: { prices: MarketPrice[] }) {
     setPrices((prev) =>
       prev.map((p) =>
         p.id === id
-          ? { ...p, avg_sold_price: newPrice, manual_override: true }
+          ? { ...p, avg_sold_price: newPrice, manual_override: true, source: 'manual' }
           : p
       )
     );
@@ -89,22 +90,27 @@ export function PricesClient({ prices: initial }: { prices: MarketPrice[] }) {
                   <div className="flex justify-between items-start">
                     <div>
                       <p className="text-sm font-medium">{price.product_name}</p>
-                      <p className="text-xs text-zinc-500">
-                        {price.source} &middot; {price.sample_size} samples &middot;{' '}
-                        {timeAgo(price.scraped_at)}
-                        {price.manual_override && (
-                          <span className="ml-1 text-yellow-500">(manual)</span>
-                        )}
-                      </p>
+                      <div className="flex gap-2 mt-0.5">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                          price.manual_override
+                            ? 'bg-yellow-500/20 text-yellow-400'
+                            : 'bg-zinc-700/50 text-zinc-400'
+                        }`}>
+                          {price.manual_override ? 'MANUAL' : 'OBSERVED'}
+                        </span>
+                        <span className="text-[10px] text-zinc-600">
+                          {price.sample_size} samples &middot; {timeAgo(price.scraped_at)}
+                        </span>
+                      </div>
                     </div>
-                    <p className="text-sm font-medium text-zinc-500">{price.condition}</p>
                   </div>
 
                   <div className="flex gap-4 mt-2 text-sm">
                     <div>
-                      <p className="text-zinc-500 text-xs">Avg</p>
+                      <p className="text-zinc-500 text-xs">Market Value</p>
                       {editingId === price.id ? (
                         <div className="flex gap-1 items-center">
+                          <span className="text-xs text-zinc-400">$</span>
                           <input
                             type="number"
                             inputMode="decimal"
@@ -112,6 +118,7 @@ export function PricesClient({ prices: initial }: { prices: MarketPrice[] }) {
                             onChange={(e) => setEditValue(e.target.value)}
                             className="w-20 bg-zinc-800 rounded px-2 py-0.5 text-sm border border-zinc-700 focus:border-emerald-500 focus:outline-none"
                             autoFocus
+                            onKeyDown={(e) => e.key === 'Enter' && handleSaveOverride(price.id)}
                           />
                           <button
                             onClick={() => handleSaveOverride(price.id)}
@@ -158,7 +165,7 @@ export function PricesClient({ prices: initial }: { prices: MarketPrice[] }) {
         ))
       ) : (
         <p className="text-zinc-500 text-sm text-center py-8">
-          No market prices yet. Run the price scraper to populate data.
+          No market prices yet. Set values from the Deals page or wait for observed data.
         </p>
       )}
     </div>

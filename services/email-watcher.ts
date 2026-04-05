@@ -1,7 +1,7 @@
 import { fetchUnreadAlerts, deleteMessage } from './gmail/client';
 import { parseWithFallback } from './gmail/parsers';
 import { createServiceClient } from '../lib/supabase/service';
-import { findCategory } from '../lib/constants';
+import { getCategories, findCategorySync } from '../lib/constants';
 
 const POLL_INTERVAL_MS = 30_000;
 const supabase = createServiceClient();
@@ -24,9 +24,10 @@ async function processAlerts(): Promise<void> {
         : 'ksl' as const;
 
       const listings = await parseWithFallback(email.subject, email.body, source);
+      const categories = await getCategories(supabase);
 
       for (const listing of listings) {
-        const category = findCategory(listing.title);
+        const category = findCategorySync(listing.title, categories);
 
         const { error } = await supabase
           .from('stc_listings')

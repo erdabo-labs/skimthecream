@@ -1,12 +1,14 @@
 "use client";
 
+import { useState } from 'react';
 import { ScoreBadge } from './score-badge';
 import type { Listing, ListingScore } from '@/lib/types';
 
 interface DealCardProps {
-  listing: Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'created_at'>;
+  listing: Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'created_at' | 'parsed_product' | 'parsed_category'>;
   onDismiss: (id: number) => void;
   onPurchase: (id: number) => void;
+  onSetValue: (id: number, productName: string, category: string | null, value: number) => void;
 }
 
 function timeAgo(dateStr: string): string {
@@ -18,7 +20,18 @@ function timeAgo(dateStr: string): string {
   return `${days}d ago`;
 }
 
-export function DealCard({ listing, onDismiss, onPurchase }: DealCardProps) {
+export function DealCard({ listing, onDismiss, onPurchase, onSetValue }: DealCardProps) {
+  const [showValueInput, setShowValueInput] = useState(false);
+  const [valueInput, setValueInput] = useState('');
+
+  function handleSetValue() {
+    const val = parseFloat(valueInput);
+    if (isNaN(val) || val <= 0) return;
+    onSetValue(listing.id, listing.parsed_product ?? listing.title, listing.parsed_category ?? null, val);
+    setShowValueInput(false);
+    setValueInput('');
+  }
+
   return (
     <div className="bg-zinc-900 rounded-xl p-4 border border-zinc-800 space-y-3">
       <div className="flex justify-between items-start gap-2">
@@ -59,30 +72,64 @@ export function DealCard({ listing, onDismiss, onPurchase }: DealCardProps) {
         </div>
       </div>
 
-      <div className="flex gap-2">
-        <button
-          onClick={() => onDismiss(listing.id)}
-          className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
-        >
-          Dismiss
-        </button>
-        {listing.listing_url && (
-          <a
-            href={listing.listing_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-blue-400 hover:bg-zinc-700 transition-colors text-center"
+      {showValueInput ? (
+        <div className="flex gap-2 items-center">
+          <span className="text-xs text-zinc-400">Worth $</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            value={valueInput}
+            onChange={(e) => setValueInput(e.target.value)}
+            className="flex-1 bg-zinc-800 rounded-lg px-3 py-2 text-sm border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+            placeholder="Market value"
+            autoFocus
+            onKeyDown={(e) => e.key === 'Enter' && handleSetValue()}
+          />
+          <button
+            onClick={handleSetValue}
+            className="text-xs px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
           >
-            View
-          </a>
-        )}
-        <button
-          onClick={() => onPurchase(listing.id)}
-          className="flex-1 text-xs py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
-        >
-          Purchase
-        </button>
-      </div>
+            Save
+          </button>
+          <button
+            onClick={() => setShowValueInput(false)}
+            className="text-xs px-2 py-2 text-zinc-500"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          <button
+            onClick={() => onDismiss(listing.id)}
+            className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
+          >
+            Dismiss
+          </button>
+          <button
+            onClick={() => setShowValueInput(true)}
+            className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-yellow-400 hover:bg-zinc-700 transition-colors"
+          >
+            Set Value
+          </button>
+          {listing.listing_url && (
+            <a
+              href={listing.listing_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-blue-400 hover:bg-zinc-700 transition-colors text-center"
+            >
+              View
+            </a>
+          )}
+          <button
+            onClick={() => onPurchase(listing.id)}
+            className="flex-1 text-xs py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
+          >
+            Buy
+          </button>
+        </div>
+      )}
     </div>
   );
 }

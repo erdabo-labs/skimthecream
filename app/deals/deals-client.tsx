@@ -5,7 +5,7 @@ import { DealCard } from '@/components/deal-card';
 import { createBrowserClient } from '@/lib/supabase/client';
 import type { Listing, ListingScore } from '@/lib/types';
 
-type DealListing = Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at'>;
+type DealListing = Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category'>;
 
 export function DealsClient({ listings: initial }: { listings: DealListing[] }) {
   const [listings, setListings] = useState(initial);
@@ -23,6 +23,42 @@ export function DealsClient({ listings: initial }: { listings: DealListing[] }) 
   async function handleDismiss(id: number) {
     await supabase.from('stc_listings').update({ status: 'dismissed' }).eq('id', id);
     setListings((prev) => prev.filter((l) => l.id !== id));
+  }
+
+  async function handleSetValue(id: number, productName: string, category: string | null, value: number) {
+    // Upsert manual market price
+    await supabase.from('stc_market_prices').upsert(
+      {
+        category: category ?? 'uncategorized',
+        product_name: productName,
+        condition: 'mixed',
+        avg_sold_price: value,
+        source: 'manual',
+        manual_override: true,
+        sample_size: 1,
+        scraped_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'category,product_name' }
+    );
+
+    // Re-score this listing with the new market value
+    const discount = ((value - (listings.find(l => l.id === id)?.asking_price ?? 0)) / value) * 100;
+    const askingPrice = listings.find(l => l.id === id)?.asking_price ?? 0;
+    const estimatedProfit = Math.round((value * 0.95 - askingPrice) * 100) / 100;
+
+    let score: 'great' | 'good' | 'pass' = 'pass';
+    if (discount >= 30 && estimatedProfit >= 200) score = 'great';
+    else if (discount >= 15 && estimatedProfit >= 50) score = 'good';
+
+    await supabase
+      .from('stc_listings')
+      .update({ score, estimated_profit: estimatedProfit, updated_at: new Date().toISOString() })
+      .eq('id', id);
+
+    setListings((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, score, estimated_profit: estimatedProfit } : l))
+    );
   }
 
   async function handlePurchase(id: number) {
@@ -84,6 +120,7 @@ export function DealsClient({ listings: initial }: { listings: DealListing[] }) 
               listing={listing}
               onDismiss={handleDismiss}
               onPurchase={handlePurchase}
+              onSetValue={handleSetValue}
             />
           ))}
         </div>

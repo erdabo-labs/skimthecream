@@ -1,7 +1,7 @@
 import { createServiceClient } from '../lib/supabase/service';
 import { parseWithAI } from '../lib/openai';
 import { sendAlert } from '../lib/ntfy';
-import { findCategory } from '../lib/constants';
+import { getCategories, findCategorySync } from '../lib/constants';
 import type { Listing, ListingScore } from '../lib/types';
 
 const supabase = createServiceClient();
@@ -22,6 +22,51 @@ Title: "${title}"`;
   } catch {
     return null;
   }
+}
+
+/**
+ * Check if the user has set a manual market value for this product.
+ * Manual prices have the highest trust — they reflect local market knowledge.
+ */
+async function getManualPrice(
+  productName: string,
+  category: string | null
+): Promise<number | null> {
+  let query = supabase
+    .from('stc_market_prices')
+    .select('avg_sold_price')
+    .eq('manual_override', true)
+    .not('avg_sold_price', 'is', null);
+
+  if (category) {
+    query = query.eq('category', category);
+  }
+
+  // Try exact product match first
+  const { data: exact } = await query.eq('product_name', productName).limit(1);
+  if (exact && exact.length > 0) return exact[0].avg_sold_price;
+
+  return null;
+}
+
+/**
+ * Combine price signals into a weighted market value.
+ * Manual price = highest trust, observed = fills gaps.
+ */
+function computeMarketValue(
+  manualPrice: number | null,
+  observed: { median: number; count: number } | null
+): number | null {
+  const hasManual = manualPrice !== null;
+  const hasObserved = observed !== null && observed.count >= 3;
+
+  if (hasManual && hasObserved) {
+    // Weight manual higher (60/40)
+    return Math.round((manualPrice! * 0.6 + observed!.median * 0.4) * 100) / 100;
+  }
+  if (hasManual) return manualPrice;
+  if (hasObserved) return observed!.median;
+  return null;
 }
 
 /**
@@ -137,8 +182,9 @@ async function scoreUnscored(): Promise<void> {
   for (const listing of listings as Listing[]) {
     try {
       // Normalize the product name
+      const categories = await getCategories(supabase);
       const productName = await normalizeProduct(listing.title);
-      const category = listing.parsed_category ?? findCategory(listing.title);
+      const category = listing.parsed_category ?? findCategorySync(listing.title, categories);
 
       // Record this listing's price for future reference
       if (listing.asking_price && category && productName) {
@@ -164,16 +210,19 @@ async function scoreUnscored(): Promise<void> {
         continue;
       }
 
-      // Get market reference from observed listings
+      // Get market reference: manual price (highest trust) + observed listings
+      const manualPrice = await getManualPrice(productName ?? listing.title, category);
       const market = category ? await getMarketPrice(productName ?? listing.title, category) : null;
+
+      // Compute weighted market value from available signals
+      const marketValue = computeMarketValue(manualPrice, market);
 
       let score: ListingScore;
       let estimatedProfit: number;
 
-      if (market && market.count >= 3) {
-        // We have enough data to compare
-        const discount = ((market.median - listing.asking_price) / market.median) * 100;
-        estimatedProfit = Math.round((market.median * 0.95 - listing.asking_price) * 100) / 100;
+      if (marketValue) {
+        const discount = ((marketValue - listing.asking_price) / marketValue) * 100;
+        estimatedProfit = Math.round((marketValue * 0.95 - listing.asking_price) * 100) / 100;
 
         if (discount >= 30 && estimatedProfit >= 200) {
           score = 'great';
@@ -183,11 +232,13 @@ async function scoreUnscored(): Promise<void> {
           score = 'pass';
         }
 
+        const sources = [];
+        if (manualPrice) sources.push(`manual $${manualPrice}`);
+        if (market && market.count >= 3) sources.push(`observed $${market.median} (${market.count})`);
         console.log(
-          `  [${score}] ${listing.title} — $${listing.asking_price} vs median $${market.median} (${market.count} observed, ${discount.toFixed(0)}% off)`
+          `  [${score}] ${listing.title} — $${listing.asking_price} vs market $${marketValue} (${sources.join(', ')}, ${discount.toFixed(0)}% off)`
         );
       } else {
-        // Not enough data yet — mark as unscored pass, will improve over time
         score = 'pass';
         estimatedProfit = 0;
         console.log(

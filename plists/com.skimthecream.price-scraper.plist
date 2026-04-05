@@ -6,8 +6,8 @@
   <string>com.skimthecream.price-scraper</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/node</string>
-    <string>dist/services/price-scraper.js</string>
+    <string>/Users/erikbowen/erdabo-labs/skimthecream/scripts/run-service.sh</string>
+    <string>price-scraper</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/erikbowen/erdabo-labs/skimthecream</string>

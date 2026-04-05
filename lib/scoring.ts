@@ -1,10 +1,11 @@
-import { CATEGORIES } from './constants';
+import type { Category } from './types';
 import type { ListingScore } from './types';
 
 export interface ScoreInput {
   askingPrice: number;
   avgMarketValue: number;
   category: string | null;
+  categoryDaysToSell?: number;
   listingAgeHours?: number;
 }
 
@@ -15,7 +16,7 @@ export interface ScoreResult {
 }
 
 export function scoreDeal(input: ScoreInput): ScoreResult {
-  const { askingPrice, avgMarketValue, category, listingAgeHours } = input;
+  const { askingPrice, avgMarketValue, category, categoryDaysToSell, listingAgeHours } = input;
 
   const estimatedSellPrice = avgMarketValue * 0.95;
   const estimatedProfit = estimatedSellPrice - askingPrice;
@@ -28,9 +29,8 @@ export function scoreDeal(input: ScoreInput): ScoreResult {
   confidence += Math.min(40, profitMargin * 0.8);
 
   // Category days-to-sell contributes up to 30 points (faster = higher)
-  if (category && CATEGORIES[category]) {
-    const daysToSell = CATEGORIES[category].avgDaysToSell;
-    confidence += Math.max(0, 30 - daysToSell);
+  if (categoryDaysToSell !== undefined) {
+    confidence += Math.max(0, 30 - categoryDaysToSell);
   }
 
   // Freshness contributes up to 30 points (newer = higher)

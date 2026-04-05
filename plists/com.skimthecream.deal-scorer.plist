@@ -6,8 +6,8 @@
   <string>com.skimthecream.deal-scorer</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/node</string>
-    <string>dist/services/deal-scorer.js</string>
+    <string>/Users/erikbowen/erdabo-labs/skimthecream/scripts/run-service.sh</string>
+    <string>deal-scorer</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/erikbowen/erdabo-labs/skimthecream</string>

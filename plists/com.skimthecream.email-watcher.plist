@@ -6,8 +6,8 @@
   <string>com.skimthecream.email-watcher</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/node</string>
-    <string>dist/services/email-watcher.js</string>
+    <string>/Users/erikbowen/erdabo-labs/skimthecream/scripts/run-service.sh</string>
+    <string>email-watcher</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/erikbowen/erdabo-labs/skimthecream</string>
