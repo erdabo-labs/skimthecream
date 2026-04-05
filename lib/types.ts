@@ -31,6 +31,7 @@ export interface Listing {
   estimated_profit: number | null;
   score: ListingScore | null;
   status: ListingStatus;
+  parsed_storage: string | null;
   raw_email_snippet: string | null;
   alert_sent: boolean;
   created_at: string;
@@ -52,6 +53,21 @@ export interface InventoryItem {
   fees: number | null;
   profit: number | null;
   status: InventoryStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProductIntel {
+  id: number;
+  product_name: string;
+  category: string | null;
+  notes: string | null;
+  difficulty: 'easy' | 'moderate' | 'hard' | null;
+  storage_matters: boolean;
+  battery_matters: boolean;
+  price_floor: number | null;
+  price_ceiling: number | null;
+  tags: string[];
   created_at: string;
   updated_at: string;
 }

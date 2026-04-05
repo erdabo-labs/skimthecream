@@ -6,35 +6,63 @@ import type { Listing, ListingScore } from '../lib/types';
 
 const supabase = createServiceClient();
 
+interface NormalizedProduct {
+  baseModel: string;   // e.g. "iPhone 13 Pro" — NO storage
+  storage: string | null;  // e.g. "128GB" or null
+}
+
 /**
  * Use AI to extract a normalized product name from a listing title.
- * Must distinguish between models precisely — iPhone 13 Mini ≠ iPhone 13 Pro Max.
+ * Returns base model (for market comparison) and storage (as modifier) separately.
+ * iPhone 13 Pro 128GB → { baseModel: "iPhone 13 Pro", storage: "128GB" }
  */
-async function normalizeProduct(title: string): Promise<string | null> {
-  const prompt = `Normalize this listing title into a canonical product name for price comparison.
+async function normalizeProduct(title: string): Promise<NormalizedProduct | null> {
+  const prompt = `Parse this listing into a base product model and storage/capacity.
 
 RULES:
-- Include brand, full model name, and key variant (size, storage, generation)
-- For phones: ALWAYS include the EXACT model tier (Mini, Pro, Pro Max, Plus, e, etc.) and storage (64GB, 128GB, 256GB)
-- For laptops: include screen size, year, and chip/processor if mentioned
-- For tablets: include generation, screen size, storage, WiFi/Cellular
-- Remove: seller descriptions, condition words (mint, like new), accessories (w/box, charger), "unlocked" status
-- Format consistently: "Brand Model Variant Storage" e.g. "iPhone 13 Pro Max 128GB" or "MacBook Air 13 2017"
-- If storage/capacity is not mentioned, omit it — don't guess
-- Two listings of the SAME product at different prices must normalize to the SAME string
-- Return "unknown" if you can't identify a specific product
+- baseModel: Brand + model + tier. NO storage. NO accessories. NO condition.
+  - Phones: "iPhone 13 Pro Max", "iPhone 16e", "Samsung Galaxy S24 Ultra"
+  - Laptops: "MacBook Air 13 2017", "MacBook Pro 14 2023 M3"
+  - Tablets: "iPad Pro 12.9 5th Gen", "iPad Air 11 M2"
+  - ALWAYS include tier: Mini, Pro, Pro Max, Plus, e, Air, Ultra etc.
+  - NEVER include storage in baseModel
+- storage: Just the capacity like "128GB", "256GB", "512GB", "1TB". null if not mentioned.
 
 Title: "${title}"
 
-Return ONLY the normalized name, nothing else.`;
+Return JSON only: {"baseModel": "...", "storage": "..." or null}`;
 
   try {
     const result = await parseWithAI(prompt);
-    const normalized = result.trim().replace(/^"/, '').replace(/"$/, '');
-    return normalized === 'unknown' ? null : normalized;
+    const cleaned = result.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
+    const parsed = JSON.parse(cleaned);
+    if (!parsed.baseModel || parsed.baseModel === 'unknown') return null;
+    return { baseModel: parsed.baseModel, storage: parsed.storage || null };
   } catch {
     return null;
   }
+}
+
+/**
+ * Get user-provided product intelligence (notes, difficulty, price bounds, etc.)
+ */
+async function getProductIntel(productName: string): Promise<{
+  notes: string | null;
+  difficulty: 'easy' | 'moderate' | 'hard' | null;
+  price_floor: number | null;
+  price_ceiling: number | null;
+  storage_matters: boolean;
+  battery_matters: boolean;
+  tags: string[];
+} | null> {
+  const { data } = await supabase
+    .from('stc_product_intel')
+    .select('notes, difficulty, price_floor, price_ceiling, storage_matters, battery_matters, tags')
+    .eq('product_name', productName)
+    .limit(1);
+
+  if (data && data.length > 0) return data[0];
+  return null;
 }
 
 /**
@@ -71,7 +99,7 @@ function computeMarketValue(
   observed: { median: number; count: number } | null
 ): number | null {
   const hasManual = manualPrice !== null;
-  const hasObserved = observed !== null && observed.count >= 3;
+  const hasObserved = observed !== null && observed.count >= 2;
 
   if (hasManual && hasObserved) {
     // Weight manual higher (60/40)
@@ -300,12 +328,14 @@ async function scoreUnscored(): Promise<void> {
 
   for (const listing of listings as Listing[]) {
     try {
-      // Normalize the product name
+      // Normalize the product name (base model + storage separately)
       const categories = await getCategories(supabase);
-      const productName = await normalizeProduct(listing.title);
+      const normalized = await normalizeProduct(listing.title);
+      const productName = normalized?.baseModel ?? null;
+      const storage = normalized?.storage ?? null;
       const category = listing.parsed_category ?? findCategorySync(listing.title, categories);
 
-      // Record this listing's price for future reference
+      // Record this listing's price for future reference (by base model)
       if (listing.asking_price && category && productName) {
         await updateMarketPrices(productName, category, listing.asking_price);
       }
@@ -315,6 +345,7 @@ async function scoreUnscored(): Promise<void> {
         .from('stc_listings')
         .update({
           parsed_product: productName,
+          parsed_storage: storage,
           parsed_category: category,
         })
         .eq('id', listing.id);
@@ -329,19 +360,34 @@ async function scoreUnscored(): Promise<void> {
         continue;
       }
 
-      // Get market reference: manual price (highest trust) + observed listings
-      const manualPrice = await getManualPrice(productName ?? listing.title, category);
-      const market = category ? await getMarketPrice(productName ?? listing.title, category) : null;
+      // Get product intel (user context) if available
+      const intel = productName ? await getProductIntel(productName) : null;
+
+      // Get market reference: user ceiling > manual price > observed listings
+      const manualPrice = intel?.price_ceiling ?? await getManualPrice(productName ?? listing.title, category);
+      const market = await getMarketPrice(productName ?? listing.title, category);
 
       // Compute weighted market value from available signals
       const marketValue = computeMarketValue(manualPrice, market);
+
+      // Apply price floor check — user says "don't buy above this"
+      if (intel?.price_floor && listing.asking_price > intel.price_floor) {
+        await supabase
+          .from('stc_listings')
+          .update({ score: 'pass', estimated_profit: 0, updated_at: new Date().toISOString() })
+          .eq('id', listing.id);
+        console.log(`  [pass] Above price floor $${intel.price_floor}: ${listing.title} — $${listing.asking_price}`);
+        continue;
+      }
 
       let score: ListingScore;
       let estimatedProfit: number;
 
       if (marketValue) {
         const discount = ((marketValue - listing.asking_price) / marketValue) * 100;
-        estimatedProfit = Math.round((marketValue * 0.95 - listing.asking_price) * 100) / 100;
+        // Factor in difficulty: hard-to-sell items need bigger margins
+        const sellFactor = intel?.difficulty === 'hard' ? 0.85 : intel?.difficulty === 'moderate' ? 0.90 : 0.95;
+        estimatedProfit = Math.round((marketValue * sellFactor - listing.asking_price) * 100) / 100;
 
         if (discount >= 30 && estimatedProfit >= 200) {
           score = 'great';
@@ -352,8 +398,10 @@ async function scoreUnscored(): Promise<void> {
         }
 
         const sources = [];
-        if (manualPrice) sources.push(`manual $${manualPrice}`);
-        if (market && market.count >= 3) sources.push(`observed $${market.median} (${market.count})`);
+        if (intel?.price_ceiling) sources.push(`ceiling $${intel.price_ceiling}`);
+        if (manualPrice && !intel?.price_ceiling) sources.push(`manual $${manualPrice}`);
+        if (market && market.count >= 2) sources.push(`observed $${market.median} (${market.count})`);
+        if (intel?.difficulty) sources.push(intel.difficulty);
         console.log(
           `  [${score}] ${listing.title} — $${listing.asking_price} vs market $${marketValue} (${sources.join(', ')}, ${discount.toFixed(0)}% off)`
         );
