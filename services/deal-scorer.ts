@@ -1,79 +1,115 @@
 import { createServiceClient } from '../lib/supabase/service';
-import { scoreDeal } from '../lib/scoring';
 import { parseWithAI } from '../lib/openai';
 import { sendAlert } from '../lib/ntfy';
-import type { Listing } from '../lib/types';
+import { findCategory } from '../lib/constants';
+import type { Listing, ListingScore } from '../lib/types';
 
 const supabase = createServiceClient();
 
-async function isRelevantProduct(title: string): Promise<boolean> {
-  const prompt = `Is this a relevant electronics product listing (tablet, laptop, telescope, 3D printer)?
-Or is it an accessory, case, screen protector, cable, or other low-value item?
+/**
+ * Use AI to extract a normalized product name from a listing title.
+ * e.g. "2017 MacBook Air 13" W/Box Charger" → "MacBook Air 2017 13"
+ */
+async function normalizeProduct(title: string): Promise<string | null> {
+  const prompt = `Extract the core product from this listing title. Remove seller fluff, accessories mentioned, and condition words. Return ONLY the normalized product name (brand + model + key spec like size/gen/year). If it's not a recognizable product, return "unknown".
 
-Title: "${title}"
-
-Reply with ONLY "relevant" or "irrelevant".`;
+Title: "${title}"`;
 
   try {
     const result = await parseWithAI(prompt);
-    return result.trim().toLowerCase() === 'relevant';
+    const normalized = result.trim().replace(/^"/, '').replace(/"$/, '');
+    return normalized === 'unknown' ? null : normalized;
   } catch {
-    // If AI fails, assume relevant to avoid missing deals
-    return true;
+    return null;
   }
 }
 
-async function findMatchingMarketPrice(
-  listing: Listing
-): Promise<{ id: number; avg_sold_price: number } | null> {
-  // Try exact category + product match
-  if (listing.parsed_category && listing.parsed_product) {
-    const { data } = await supabase
-      .from('stc_market_prices')
-      .select('id, avg_sold_price')
-      .eq('category', listing.parsed_category)
-      .ilike('product_name', `%${listing.parsed_product}%`)
-      .order('scraped_at', { ascending: false })
-      .limit(1);
+/**
+ * Look at all previous listings we've seen for similar products
+ * and compute the median asking price as our market reference.
+ */
+async function getMarketPrice(
+  productName: string,
+  category: string | null
+): Promise<{ median: number; count: number } | null> {
+  // Query all listings with asking prices in the same category
+  let query = supabase
+    .from('stc_listings')
+    .select('asking_price')
+    .not('asking_price', 'is', null)
+    .gt('asking_price', 0);
 
-    if (data && data.length > 0 && data[0].avg_sold_price) {
-      return { id: data[0].id, avg_sold_price: data[0].avg_sold_price };
-    }
+  if (category) {
+    query = query.eq('parsed_category', category);
   }
 
-  // Fuzzy match via AI
-  const { data: allPrices } = await supabase
+  const { data } = await query;
+
+  if (!data || data.length < 2) return null;
+
+  // Use AI to find which of these are the same product
+  // For now, just use category median — as we collect more data this gets better
+  const prices = data
+    .map((d) => d.asking_price as number)
+    .sort((a, b) => a - b);
+
+  const mid = Math.floor(prices.length / 2);
+  const median =
+    prices.length % 2 === 0
+      ? (prices[mid - 1] + prices[mid]) / 2
+      : prices[mid];
+
+  return { median, count: prices.length };
+}
+
+/**
+ * Update market_prices table with observed data from our listings.
+ * This builds our price intelligence over time.
+ */
+async function updateMarketPrices(
+  productName: string,
+  category: string,
+  askingPrice: number
+): Promise<void> {
+  // Check if we already track this product
+  const { data: existing } = await supabase
     .from('stc_market_prices')
-    .select('id, product_name, avg_sold_price')
-    .not('avg_sold_price', 'is', null);
+    .select('id, avg_sold_price, low_sold_price, high_sold_price, sample_size')
+    .eq('category', category)
+    .eq('product_name', productName)
+    .eq('source', 'observed')
+    .limit(1);
 
-  if (!allPrices || allPrices.length === 0) return null;
+  if (existing && existing.length > 0) {
+    const row = existing[0];
+    const n = row.sample_size + 1;
+    const newAvg =
+      ((row.avg_sold_price ?? 0) * row.sample_size + askingPrice) / n;
 
-  const productList = allPrices
-    .map((p) => `${p.id}: ${p.product_name}`)
-    .join('\n');
-
-  const prompt = `Which product best matches this listing? Return ONLY the ID number, or "none".
-
-Listing: "${listing.title}"
-
-Products:
-${productList}`;
-
-  try {
-    const result = await parseWithAI(prompt);
-    const matchId = parseInt(result.trim());
-    if (isNaN(matchId)) return null;
-
-    const match = allPrices.find((p) => p.id === matchId);
-    if (match && match.avg_sold_price) {
-      return { id: match.id, avg_sold_price: match.avg_sold_price };
-    }
-  } catch {
-    // Ignore AI errors
+    await supabase
+      .from('stc_market_prices')
+      .update({
+        avg_sold_price: Math.round(newAvg * 100) / 100,
+        low_sold_price: Math.min(row.low_sold_price ?? askingPrice, askingPrice),
+        high_sold_price: Math.max(row.high_sold_price ?? askingPrice, askingPrice),
+        sample_size: n,
+        scraped_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', row.id);
+  } else {
+    await supabase.from('stc_market_prices').insert({
+      category,
+      product_name: productName,
+      condition: 'mixed',
+      avg_sold_price: askingPrice,
+      low_sold_price: askingPrice,
+      high_sold_price: askingPrice,
+      source: 'observed',
+      sample_size: 1,
+      scraped_at: new Date().toISOString(),
+    });
   }
-
-  return null;
 }
 
 async function scoreUnscored(): Promise<void> {
@@ -100,63 +136,81 @@ async function scoreUnscored(): Promise<void> {
 
   for (const listing of listings as Listing[]) {
     try {
-      // First pass: check if it's a relevant product
-      const relevant = await isRelevantProduct(listing.title);
+      // Normalize the product name
+      const productName = await normalizeProduct(listing.title);
+      const category = listing.parsed_category ?? findCategory(listing.title);
 
-      if (!relevant) {
+      // Record this listing's price for future reference
+      if (listing.asking_price && category && productName) {
+        await updateMarketPrices(productName, category, listing.asking_price);
+      }
+
+      // Update parsed fields
+      await supabase
+        .from('stc_listings')
+        .update({
+          parsed_product: productName,
+          parsed_category: category,
+        })
+        .eq('id', listing.id);
+
+      // If no asking price, can't score
+      if (!listing.asking_price) {
         await supabase
           .from('stc_listings')
           .update({ score: 'pass', estimated_profit: 0, updated_at: new Date().toISOString() })
           .eq('id', listing.id);
-        console.log(`  [pass] Irrelevant: ${listing.title}`);
+        console.log(`  [pass] No price: ${listing.title}`);
         continue;
       }
 
-      // Find matching market price
-      const marketMatch = await findMatchingMarketPrice(listing);
+      // Get market reference from observed listings
+      const market = category ? await getMarketPrice(productName ?? listing.title, category) : null;
 
-      if (!marketMatch || !listing.asking_price) {
-        await supabase
-          .from('stc_listings')
-          .update({ score: 'pass', estimated_profit: 0, updated_at: new Date().toISOString() })
-          .eq('id', listing.id);
-        console.log(`  [pass] No price data: ${listing.title}`);
-        continue;
+      let score: ListingScore;
+      let estimatedProfit: number;
+
+      if (market && market.count >= 3) {
+        // We have enough data to compare
+        const discount = ((market.median - listing.asking_price) / market.median) * 100;
+        estimatedProfit = Math.round((market.median * 0.95 - listing.asking_price) * 100) / 100;
+
+        if (discount >= 30 && estimatedProfit >= 200) {
+          score = 'great';
+        } else if (discount >= 15 && estimatedProfit >= 50) {
+          score = 'good';
+        } else {
+          score = 'pass';
+        }
+
+        console.log(
+          `  [${score}] ${listing.title} — $${listing.asking_price} vs median $${market.median} (${market.count} observed, ${discount.toFixed(0)}% off)`
+        );
+      } else {
+        // Not enough data yet — mark as unscored pass, will improve over time
+        score = 'pass';
+        estimatedProfit = 0;
+        console.log(
+          `  [pass] Not enough market data yet (${market?.count ?? 0} observed): ${listing.title} — $${listing.asking_price}`
+        );
       }
-
-      // Score the deal
-      const ageHours =
-        (Date.now() - new Date(listing.created_at).getTime()) / (1000 * 60 * 60);
-
-      const result = scoreDeal({
-        askingPrice: listing.asking_price,
-        avgMarketValue: marketMatch.avg_sold_price,
-        category: listing.parsed_category,
-        listingAgeHours: ageHours,
-      });
 
       await supabase
         .from('stc_listings')
         .update({
-          score: result.score,
-          estimated_profit: result.estimatedProfit,
-          market_price_id: marketMatch.id,
+          score,
+          estimated_profit: estimatedProfit,
           updated_at: new Date().toISOString(),
         })
         .eq('id', listing.id);
 
-      console.log(
-        `  [${result.score}] ${listing.title} — $${listing.asking_price} → profit $${result.estimatedProfit}`
-      );
-
-      // Send notification for good/great deals
-      if ((result.score === 'good' || result.score === 'great') && !listing.alert_sent) {
-        const priority = result.score === 'great' ? 5 : 4;
-        const emoji = result.score === 'great' ? '🔥' : '💰';
+      // Alert for good/great deals
+      if ((score === 'good' || score === 'great') && !listing.alert_sent) {
+        const priority = score === 'great' ? 5 : 4;
 
         await sendAlert(
-          `${emoji} ${result.score.toUpperCase()}: $${result.estimatedProfit} profit`,
-          `${listing.title}\nAsking: $${listing.asking_price}\nMarket: $${marketMatch.avg_sold_price}`,
+          `${score.toUpperCase()}: $${estimatedProfit} potential profit`,
+          `${listing.title}\nAsking: $${listing.asking_price}${market ? `\nMedian: $${market.median} (${market.count} listings seen)` : ''}`,
           priority,
           listing.listing_url ?? undefined
         );
@@ -172,5 +226,4 @@ async function scoreUnscored(): Promise<void> {
   }
 }
 
-// Run once (launchd handles scheduling)
 scoreUnscored().catch(console.error);
