@@ -1,0 +1,36 @@
+{
+  "name": "skimthecream",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "build:services": "tsc -p tsconfig.services.json",
+    "dev:email-watcher": "npx tsx services/email-watcher.ts",
+    "dev:price-scraper": "npx tsx services/price-scraper.ts",
+    "dev:deal-scorer": "npx tsx services/deal-scorer.ts",
+    "services:install": "ln -sf $(pwd)/plists/com.skimthecream.*.plist ~/Library/LaunchAgents/"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.101.1",
+    "cheerio": "^1.2.0",
+    "googleapis": "^171.4.0",
+    "next": "16.2.2",
+    "openai": "^6.33.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "recharts": "^3.8.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.2",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

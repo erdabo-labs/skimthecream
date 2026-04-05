@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "noEmit": false,
+    "declaration": false,
+    "jsx": "react-jsx"
+  },
+  "include": ["services/**/*.ts", "lib/**/*.ts"],
+  "exclude": ["node_modules", ".next", "app", "components"]
+}

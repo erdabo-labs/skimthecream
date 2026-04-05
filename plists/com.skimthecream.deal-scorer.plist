@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.skimthecream.deal-scorer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>dist/services/deal-scorer.js</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/erikbowen/erdabo-labs/skimthecream</string>
+  <key>StartInterval</key>
+  <integer>120</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/erikbowen/erdabo-labs/skimthecream/logs/deal-scorer.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/erikbowen/erdabo-labs/skimthecream/logs/deal-scorer-error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
