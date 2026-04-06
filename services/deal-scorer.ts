@@ -59,7 +59,13 @@ EXTRACTION RULES:
 - conditionNotes: Specific condition details from the listing. e.g. "screen cracked", "battery 82%", "minor scratches on back", "comes with box". null if nothing specific mentioned.
 - year: Production year or generation year. null if can't determine.
 - processor: CPU/chip. "M1", "M2 Pro", "M3 Max", "A17 Pro", "i7-10700". null if not mentioned.
-- isAccessory: TRUE for cases, covers, chargers, cables, adapters, mounts, bands, filament, nozzles, build plates, PEI plates, screen protectors. FALSE for main products even if bundled with accessories.
+- isAccessory: TRUE if the listing is selling PARTS or ACCESSORIES, not a complete working product:
+  - Phone/tablet: cases, covers, screen protectors, chargers, cables, adapters, bands, straps, pencils, keyboards (standalone)
+  - 3D printers: nozzles, hotends, extruders, build plates, PEI plates, filament, spools, print heads, "complete assembly" (meaning hotend assembly, NOT a full printer), "assembly and nozzles", tool heads, bed surfaces
+  - Telescopes: eyepieces, filters, mounts (standalone), adapters, cases
+  - CRITICAL: If the title mentions PARTS like "nozzles", "assembly", "hotend", "extruder" alongside a printer model name, it's selling PARTS FOR that printer, not the printer itself. "Bambu P1S nozzles" = accessory. "Bambu P1S 3D printer" = NOT accessory.
+  - A title listing multiple models + parts (e.g. "P1S & X1C assembly and nozzles") = selling parts compatible with those models, NOT selling the printers
+  - FALSE for main products even if bundled with accessories. "iPad Pro with Magic Keyboard" = NOT accessory.
 - isDamaged: TRUE if "for parts", "broken", "doesn't work", "cracked screen", "water damage", "as-is". Note: cosmetic scratches alone = NOT damaged (that's condition:fair).
 - isRental: TRUE for "rent", "rental", "per day", "hourly"
 - isWanted: TRUE for "ISO", "WTB", "looking for", "wanted", "in search of"
