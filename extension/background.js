@@ -101,6 +101,7 @@ async function ingestListings(listings) {
 
   let inserted = 0;
   let skipped = 0;
+  const ingestedIds = [];
 
   for (const listing of listings) {
     try {
@@ -138,6 +139,7 @@ async function ingestListings(listings) {
 
       if (res.ok || res.status === 409) {
         inserted++;
+        ingestedIds.push(listing.source_id);
       } else {
         const text = await res.text();
         console.log(`[STC] Insert failed: ${res.status} ${text}`);
@@ -157,7 +159,7 @@ async function ingestListings(listings) {
   });
 
   console.log(`[STC] Ingested ${inserted}, skipped ${skipped}`);
-  return { inserted, skipped };
+  return { inserted, skipped, ingestedIds };
 }
 
 // Listen for messages from content scripts

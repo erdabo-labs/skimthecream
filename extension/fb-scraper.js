@@ -4,9 +4,27 @@
 (function () {
   const SEEN_KEY = 'stc_seen_fb';
 
+  function getSeen() {
+    return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}');
+  }
+
+  function markSeen(sourceIds) {
+    const seen = getSeen();
+    const now = Date.now();
+    for (const id of sourceIds) {
+      seen[id] = now;
+    }
+    // Clean old entries (older than 7 days)
+    const week = 7 * 24 * 60 * 60 * 1000;
+    for (const [key, timestamp] of Object.entries(seen)) {
+      if (now - timestamp > week) delete seen[key];
+    }
+    localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+  }
+
   function extractListings() {
     const listings = [];
-    const seen = JSON.parse(localStorage.getItem(SEEN_KEY) || '{}');
+    const seen = getSeen();
 
     // Facebook Marketplace listing cards — they use <a> tags with /marketplace/item/ URLs
     const links = document.querySelectorAll('a[href*="/marketplace/item/"]');
@@ -73,20 +91,10 @@
           url: cleanUrl,
           snippet: allText || null,
         });
-
-        // Mark as seen
-        seen[sourceId] = Date.now();
       } catch (err) {
         console.error('[STC] Error parsing FB listing:', err);
       }
     }
-
-    // Clean old entries (older than 7 days)
-    const week = 7 * 24 * 60 * 60 * 1000;
-    for (const [key, timestamp] of Object.entries(seen)) {
-      if (Date.now() - timestamp > week) delete seen[key];
-    }
-    localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
 
     return listings;
   }
@@ -99,8 +107,13 @@
       chrome.runtime.sendMessage(
         { type: 'LISTINGS_FOUND', listings },
         (response) => {
-          if (response) {
+          if (response && response.inserted > 0) {
+            // Only mark as seen after successful ingest
+            const ingestedIds = response.ingestedIds || listings.map(l => l.source_id);
+            markSeen(ingestedIds);
             console.log(`[STC] Ingested: ${response.inserted}, skipped: ${response.skipped}`);
+          } else if (response) {
+            console.log(`[STC] Skipped all ${response.skipped}`);
           }
         }
       );

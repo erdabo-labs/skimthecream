@@ -4,9 +4,27 @@
 (function () {
   const SEEN_KEY = 'stc_seen_ksl';
 
+  function getSeen() {
+    return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}');
+  }
+
+  function markSeen(sourceIds) {
+    const seen = getSeen();
+    const now = Date.now();
+    for (const id of sourceIds) {
+      seen[id] = now;
+    }
+    // Clean old entries (older than 7 days)
+    const week = 7 * 24 * 60 * 60 * 1000;
+    for (const [key, timestamp] of Object.entries(seen)) {
+      if (now - timestamp > week) delete seen[key];
+    }
+    localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+  }
+
   function extractListings() {
     const listings = [];
-    const seen = JSON.parse(localStorage.getItem(SEEN_KEY) || '{}');
+    const seen = getSeen();
 
     // KSL listing cards — look for listing links
     const cards = document.querySelectorAll(
@@ -62,19 +80,10 @@
           price,
           url: cleanUrl,
         });
-
-        seen[sourceId] = Date.now();
       } catch (err) {
         console.error('[STC] Error parsing KSL listing:', err);
       }
     }
-
-    // Clean old entries
-    const week = 7 * 24 * 60 * 60 * 1000;
-    for (const [key, timestamp] of Object.entries(seen)) {
-      if (Date.now() - timestamp > week) delete seen[key];
-    }
-    localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
 
     return listings;
   }
@@ -86,8 +95,12 @@
       chrome.runtime.sendMessage(
         { type: 'LISTINGS_FOUND', listings },
         (response) => {
-          if (response) {
+          if (response && response.inserted > 0) {
+            const ingestedIds = response.ingestedIds || listings.map(l => l.source_id);
+            markSeen(ingestedIds);
             console.log(`[STC] Ingested: ${response.inserted}, skipped: ${response.skipped}`);
+          } else if (response) {
+            console.log(`[STC] Skipped all ${response.skipped}`);
           }
         }
       );
