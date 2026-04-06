@@ -37,6 +37,10 @@ export interface Listing {
   feedback_note: string | null;
   raw_email_snippet: string | null;
   alert_sent: boolean;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  gone_at: string | null;
+  days_active: number | null;
   created_at: string;
   updated_at: string;
 }

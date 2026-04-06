@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.skimthecream.listing-monitor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/erikbowen/erdabo-labs/skimthecream/scripts/run-service.sh</string>
+    <string>listing-monitor</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/erikbowen/erdabo-labs/skimthecream</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/erikbowen/erdabo-labs/skimthecream/logs/listing-monitor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/erikbowen/erdabo-labs/skimthecream/logs/listing-monitor-error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

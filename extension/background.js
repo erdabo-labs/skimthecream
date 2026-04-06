@@ -133,6 +133,7 @@ async function ingestListings(listings) {
           asking_price: listing.price,
           listing_url: listing.url,
           raw_email_snippet: description,
+          first_seen_at: new Date().toISOString(),
           status: 'new',
         }),
       });

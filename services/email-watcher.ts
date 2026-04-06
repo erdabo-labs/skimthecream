@@ -35,6 +35,7 @@ async function processAlerts(): Promise<void> {
             {
               ...listing,
               parsed_category: category,
+              first_seen_at: new Date().toISOString(),
               status: 'new',
             },
             { onConflict: 'source,source_id' }
