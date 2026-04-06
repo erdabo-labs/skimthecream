@@ -113,8 +113,6 @@ export function HomeClient({ active: initialActive, hot: initialHot, recent: ini
   const filteredRecent = recent.filter((l) => {
     if (scoreFilter !== 'all' && l.score !== scoreFilter) return false;
     if (sourceFilter !== 'all' && l.source !== sourceFilter) return false;
-    // Don't show items already in hot or active sections
-    if (hot.some((h) => h.id === l.id) || active.some((a) => a.id === l.id)) return false;
     return true;
   });
 
