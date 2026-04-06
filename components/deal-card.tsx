@@ -11,6 +11,7 @@ interface DealCardProps {
   onStatusChange: (id: number, status: string) => void;
   onSetValue: (id: number, productName: string, category: string | null, value: number) => void;
   onFeedback: (id: number, feedback: string, note?: string) => void;
+  compact?: boolean;
 }
 
 function timeAgo(dateStr: string): string {
@@ -22,11 +23,23 @@ function timeAgo(dateStr: string): string {
   return `${days}d ago`;
 }
 
-export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSetValue, onFeedback }: DealCardProps) {
+function cardStyle(score: ListingScore | null): string {
+  switch (score) {
+    case 'great':
+      return 'border-emerald-500/50 bg-emerald-500/5 shadow-lg shadow-emerald-500/10';
+    case 'good':
+      return 'border-amber-500/30 bg-amber-500/5';
+    default:
+      return 'border-zinc-800 bg-zinc-900';
+  }
+}
+
+export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSetValue, onFeedback, compact = false }: DealCardProps) {
   const [showValueInput, setShowValueInput] = useState(false);
   const [valueInput, setValueInput] = useState('');
   const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackNote, setFeedbackNote] = useState('');
+  const [expanded, setExpanded] = useState(false);
 
   function handleSetValue() {
     const val = parseFloat(valueInput);
@@ -36,49 +49,80 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
     setValueInput('');
   }
 
+  const isPass = listing.score === 'pass' || !listing.score;
+  const shouldCollapse = compact && isPass && !expanded;
+
+  // Collapsed pass card — just show title + price on one line
+  if (shouldCollapse) {
+    return (
+      <button
+        onClick={() => setExpanded(true)}
+        className="w-full text-left bg-zinc-900/50 rounded-lg px-3 py-2 border border-zinc-800/50 flex items-center justify-between gap-2 hover:bg-zinc-900 transition-colors"
+      >
+        <span className="text-xs text-zinc-400 truncate">{listing.title}</span>
+        <span className="text-xs text-zinc-500 shrink-0">
+          {listing.asking_price ? `$${listing.asking_price}` : ''}
+        </span>
+      </button>
+    );
+  }
+
   return (
-    <div className="bg-zinc-900 rounded-xl p-4 border border-zinc-800 space-y-3">
+    <div className={`rounded-xl p-4 border space-y-3 transition-all ${cardStyle(listing.score as ListingScore)}`}>
+      {/* Header */}
       <div className="flex justify-between items-start gap-2">
         <div className="min-w-0">
-          <h3 className="font-medium text-sm leading-tight truncate">
+          <h3 className={`font-medium leading-tight truncate ${listing.score === 'great' ? 'text-base' : 'text-sm'}`}>
             {listing.title}
           </h3>
           <p className="text-xs text-zinc-500 mt-0.5">
-            {listing.source === 'facebook' ? 'FB' : 'KSL'} &middot;{' '}
-            {timeAgo(listing.created_at)}
+            {listing.source === 'facebook' ? 'FB' : 'KSL'} &middot; {timeAgo(listing.created_at)}
+            {listing.parsed_product && (
+              <span className="text-zinc-600"> &middot; {listing.parsed_product}</span>
+            )}
           </p>
         </div>
-        {listing.score && <ScoreBadge score={listing.score as ListingScore} />}
+        {listing.score && (
+          <ScoreBadge score={listing.score as ListingScore} size={listing.score === 'great' ? 'lg' : 'sm'} />
+        )}
       </div>
 
+      {/* Status badge */}
+      {listing.status === 'contacted' && (
+        <div className="text-[10px] px-2 py-1 rounded bg-blue-500/20 text-blue-400 text-center font-medium">
+          Talking to seller
+        </div>
+      )}
+
+      {/* Prices */}
       <div className="flex gap-4 text-sm">
         <div>
-          <p className="text-zinc-500 text-xs">Asking</p>
-          <p className="font-semibold">
+          <p className="text-zinc-500 text-[10px] uppercase tracking-wide">Asking</p>
+          <p className="font-bold text-base">
             {listing.asking_price ? `$${listing.asking_price}` : '—'}
           </p>
         </div>
-        <div>
-          <p className="text-zinc-500 text-xs">Est. Profit</p>
-          <p
-            className={`font-semibold ${
-              (listing.estimated_profit ?? 0) >= 200
-                ? 'text-emerald-400'
-                : (listing.estimated_profit ?? 0) >= 50
-                  ? 'text-yellow-400'
-                  : 'text-zinc-400'
-            }`}
-          >
-            {listing.estimated_profit != null
-              ? `$${listing.estimated_profit}`
-              : '—'}
-          </p>
-        </div>
+        {(listing.estimated_profit ?? 0) !== 0 && (
+          <div>
+            <p className="text-zinc-500 text-[10px] uppercase tracking-wide">Profit</p>
+            <p
+              className={`font-bold text-base ${
+                (listing.estimated_profit ?? 0) >= 200
+                  ? 'text-emerald-400'
+                  : (listing.estimated_profit ?? 0) >= 50
+                    ? 'text-amber-400'
+                    : 'text-zinc-400'
+              }`}
+            >
+              ${listing.estimated_profit}
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Price source */}
       {listing.price_source && (
-        <p className="text-[10px] text-zinc-600">{listing.price_source}</p>
+        <p className="text-[10px] text-zinc-600 leading-tight">{listing.price_source}</p>
       )}
 
       {/* Feedback badge */}
@@ -93,6 +137,7 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
         </span>
       )}
 
+      {/* Feedback panel */}
       {showFeedback ? (
         <div className="space-y-2">
           <div className="flex gap-1 flex-wrap">
@@ -136,29 +181,12 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
             autoFocus
             onKeyDown={(e) => e.key === 'Enter' && handleSetValue()}
           />
-          <button
-            onClick={handleSetValue}
-            className="text-xs px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
-          >
-            Save
-          </button>
-          <button
-            onClick={() => setShowValueInput(false)}
-            className="text-xs px-2 py-2 text-zinc-500"
-          >
-            Cancel
-          </button>
+          <button onClick={handleSetValue} className="text-xs px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors">Save</button>
+          <button onClick={() => setShowValueInput(false)} className="text-xs px-2 py-2 text-zinc-500">Cancel</button>
         </div>
       ) : (
         <div className="space-y-2">
-          {/* Status badge */}
-          {listing.status === 'contacted' && (
-            <div className="text-[10px] px-2 py-1 rounded bg-blue-500/20 text-blue-400 text-center">
-              Talking to seller
-            </div>
-          )}
-
-          {/* Main actions row */}
+          {/* Main actions */}
           <div className="flex gap-1.5">
             {listing.listing_url && (
               <a
@@ -209,20 +237,10 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
               </>
             )}
           </div>
-          {/* Secondary actions */}
+          {/* Secondary */}
           <div className="flex gap-3">
-            <button
-              onClick={() => setShowValueInput(true)}
-              className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors"
-            >
-              Set value
-            </button>
-            <button
-              onClick={() => setShowFeedback(true)}
-              className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors"
-            >
-              Feedback
-            </button>
+            <button onClick={() => setShowValueInput(true)} className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors">Set value</button>
+            <button onClick={() => setShowFeedback(true)} className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors">Feedback</button>
           </div>
         </div>
       )}
