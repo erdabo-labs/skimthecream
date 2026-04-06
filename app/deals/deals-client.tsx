@@ -25,6 +25,11 @@ export function DealsClient({ listings: initial }: { listings: DealListing[] }) 
     setListings((prev) => prev.filter((l) => l.id !== id));
   }
 
+  async function handleStatusChange(id: number, status: string) {
+    await supabase.from('stc_listings').update({ status, updated_at: new Date().toISOString() }).eq('id', id);
+    setListings((prev) => prev.map((l) => (l.id === id ? { ...l, status: status as any } : l)));
+  }
+
   async function handleSetValue(id: number, productName: string, category: string | null, value: number) {
     // Upsert manual market price
     await supabase.from('stc_market_prices').upsert(
@@ -120,6 +125,7 @@ export function DealsClient({ listings: initial }: { listings: DealListing[] }) 
               listing={listing}
               onDismiss={handleDismiss}
               onPurchase={handlePurchase}
+              onStatusChange={handleStatusChange}
               onSetValue={handleSetValue}
             />
           ))}

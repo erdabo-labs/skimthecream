@@ -5,9 +5,10 @@ import { ScoreBadge } from './score-badge';
 import type { Listing, ListingScore } from '@/lib/types';
 
 interface DealCardProps {
-  listing: Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'created_at' | 'parsed_product' | 'parsed_category'>;
+  listing: Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category'>;
   onDismiss: (id: number) => void;
   onPurchase: (id: number) => void;
+  onStatusChange: (id: number, status: string) => void;
   onSetValue: (id: number, productName: string, category: string | null, value: number) => void;
 }
 
@@ -20,7 +21,7 @@ function timeAgo(dateStr: string): string {
   return `${days}d ago`;
 }
 
-export function DealCard({ listing, onDismiss, onPurchase, onSetValue }: DealCardProps) {
+export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSetValue }: DealCardProps) {
   const [showValueInput, setShowValueInput] = useState(false);
   const [valueInput, setValueInput] = useState('');
 
@@ -99,35 +100,64 @@ export function DealCard({ listing, onDismiss, onPurchase, onSetValue }: DealCar
           </button>
         </div>
       ) : (
-        <div className="flex gap-2">
-          <button
-            onClick={() => onDismiss(listing.id)}
-            className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
-          >
-            Dismiss
-          </button>
-          <button
-            onClick={() => setShowValueInput(true)}
-            className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-yellow-400 hover:bg-zinc-700 transition-colors"
-          >
-            Set Value
-          </button>
-          {listing.listing_url && (
-            <a
-              href={listing.listing_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-blue-400 hover:bg-zinc-700 transition-colors text-center"
-            >
-              View
-            </a>
+        <div className="space-y-2">
+          {/* Status badge */}
+          {listing.status === 'contacted' && (
+            <div className="text-[10px] px-2 py-1 rounded bg-blue-500/20 text-blue-400 text-center">
+              Talking to seller
+            </div>
           )}
-          <button
-            onClick={() => onPurchase(listing.id)}
-            className="flex-1 text-xs py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
-          >
-            Buy
-          </button>
+
+          {/* Main actions row */}
+          <div className="flex gap-2">
+            <button
+              onClick={() => onDismiss(listing.id)}
+              className="text-xs py-2 px-2 rounded-lg bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
+            >
+              Dismiss
+            </button>
+            <button
+              onClick={() => setShowValueInput(true)}
+              className="text-xs py-2 px-2 rounded-lg bg-zinc-800 text-yellow-400 hover:bg-zinc-700 transition-colors"
+            >
+              $Value
+            </button>
+            {listing.listing_url && (
+              <a
+                href={listing.listing_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs py-2 px-2 rounded-lg bg-zinc-800 text-blue-400 hover:bg-zinc-700 transition-colors text-center"
+              >
+                View
+              </a>
+            )}
+            {listing.status === 'new' && (
+              <button
+                onClick={() => onStatusChange(listing.id, 'contacted')}
+                className="flex-1 text-xs py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition-colors font-medium"
+              >
+                Contacting
+              </button>
+            )}
+            {listing.status === 'contacted' && (
+              <>
+                <a
+                  href={`/negotiate/${listing.id}`}
+                  className="flex-1 text-xs py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-500 transition-colors font-medium text-center"
+                >
+                  Negotiate
+                </a>
+                <button
+                  onClick={() => onPurchase(listing.id)}
+                  className="flex-1 text-xs py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
+                >
+                  Bought
+                </button>
+              </>
+            )}
+            {listing.status !== 'contacted' && listing.status !== 'new' ? null : null}
+          </div>
         </div>
       )}
     </div>

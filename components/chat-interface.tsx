@@ -82,9 +82,14 @@ export function ChatInterface({
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto space-y-3 p-4">
         {messages.length === 0 && (
-          <p className="text-zinc-500 text-sm text-center py-4">
-            Describe the situation and I&apos;ll help you negotiate.
-          </p>
+          <div className="text-zinc-500 text-sm text-center py-4 space-y-2">
+            <p>I&apos;ll help you negotiate. You can:</p>
+            <p className="text-xs">
+              &bull; Ask for an opening message to send<br />
+              &bull; Paste what the seller said and I&apos;ll suggest a reply<br />
+              &bull; Tell me the situation and I&apos;ll coach you
+            </p>
+          </div>
         )}
 
         {messages.map((msg, i) => (
