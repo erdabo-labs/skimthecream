@@ -32,6 +32,9 @@ export interface Listing {
   score: ListingScore | null;
   status: ListingStatus;
   parsed_storage: string | null;
+  price_source: string | null;
+  feedback: string | null;
+  feedback_note: string | null;
   raw_email_snippet: string | null;
   alert_sent: boolean;
   created_at: string;

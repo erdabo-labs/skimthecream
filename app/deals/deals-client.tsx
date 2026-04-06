@@ -5,7 +5,7 @@ import { DealCard } from '@/components/deal-card';
 import { createBrowserClient } from '@/lib/supabase/client';
 import type { Listing, ListingScore } from '@/lib/types';
 
-type DealListing = Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category'>;
+type DealListing = Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category' | 'price_source' | 'feedback'>;
 
 export function DealsClient({ listings: initial }: { listings: DealListing[] }) {
   const [listings, setListings] = useState(initial);
@@ -23,6 +23,22 @@ export function DealsClient({ listings: initial }: { listings: DealListing[] }) 
   async function handleDismiss(id: number) {
     await supabase.from('stc_listings').update({ status: 'dismissed' }).eq('id', id);
     setListings((prev) => prev.filter((l) => l.id !== id));
+  }
+
+  async function handleFeedback(id: number, feedback: string, note?: string) {
+    await supabase.from('stc_listings').update({
+      feedback,
+      feedback_note: note ?? null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', id);
+
+    setListings((prev) => prev.map((l) => (l.id === id ? { ...l, feedback } : l)));
+
+    // If marked as scam or wrong_product, auto-dismiss
+    if (feedback === 'scam' || feedback === 'wrong_product' || feedback === 'accessory') {
+      await supabase.from('stc_listings').update({ status: 'dismissed' }).eq('id', id);
+      setListings((prev) => prev.filter((l) => l.id !== id));
+    }
   }
 
   async function handleStatusChange(id: number, status: string) {
@@ -127,6 +143,7 @@ export function DealsClient({ listings: initial }: { listings: DealListing[] }) 
               onPurchase={handlePurchase}
               onStatusChange={handleStatusChange}
               onSetValue={handleSetValue}
+              onFeedback={handleFeedback}
             />
           ))}
         </div>

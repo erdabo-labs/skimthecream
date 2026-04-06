@@ -8,7 +8,7 @@ export default async function DealsPage() {
 
   const { data: listings } = await supabase
     .from('stc_listings')
-    .select('id, title, asking_price, estimated_profit, score, source, listing_url, status, created_at, parsed_product, parsed_category')
+    .select('id, title, asking_price, estimated_profit, score, source, listing_url, status, created_at, parsed_product, parsed_category, price_source, feedback')
     .in('status', ['new', 'contacted'])
     .order('created_at', { ascending: false })
     .limit(100);

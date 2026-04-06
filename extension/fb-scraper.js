@@ -58,12 +58,20 @@
         // Clean the URL
         const cleanUrl = `https://www.facebook.com/marketplace/item/${itemId}/`;
 
+        // Grab extra text from the card as description snippet
+        const allText = lines.filter(l =>
+          l !== title &&
+          !l.match(/^\$/) &&
+          !l.match(/^(Listed|Just listed|mile|km|·|\d+ mi|See more|Marketplace)/i)
+        ).join(' ').slice(0, 300);
+
         listings.push({
           source: 'facebook',
           source_id: sourceId,
           title,
           price,
           url: cleanUrl,
+          snippet: allText || null,
         });
 
         // Mark as seen

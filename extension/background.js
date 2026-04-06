@@ -35,6 +35,7 @@ async function ingestListings(listings) {
           title: listing.title,
           asking_price: listing.price,
           listing_url: listing.url,
+          raw_email_snippet: listing.snippet || null,
           status: 'new',
         }),
       });

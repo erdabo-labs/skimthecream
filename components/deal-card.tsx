@@ -5,11 +5,12 @@ import { ScoreBadge } from './score-badge';
 import type { Listing, ListingScore } from '@/lib/types';
 
 interface DealCardProps {
-  listing: Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category'>;
+  listing: Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category' | 'price_source' | 'feedback'>;
   onDismiss: (id: number) => void;
   onPurchase: (id: number) => void;
   onStatusChange: (id: number, status: string) => void;
   onSetValue: (id: number, productName: string, category: string | null, value: number) => void;
+  onFeedback: (id: number, feedback: string, note?: string) => void;
 }
 
 function timeAgo(dateStr: string): string {
@@ -21,9 +22,11 @@ function timeAgo(dateStr: string): string {
   return `${days}d ago`;
 }
 
-export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSetValue }: DealCardProps) {
+export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSetValue, onFeedback }: DealCardProps) {
   const [showValueInput, setShowValueInput] = useState(false);
   const [valueInput, setValueInput] = useState('');
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedbackNote, setFeedbackNote] = useState('');
 
   function handleSetValue() {
     const val = parseFloat(valueInput);
@@ -73,7 +76,54 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
         </div>
       </div>
 
-      {showValueInput ? (
+      {/* Price source */}
+      {listing.price_source && (
+        <p className="text-[10px] text-zinc-600">{listing.price_source}</p>
+      )}
+
+      {/* Feedback badge */}
+      {listing.feedback && (
+        <span className={`text-[10px] px-2 py-0.5 rounded inline-block ${
+          listing.feedback === 'scam' ? 'bg-red-500/20 text-red-400' :
+          listing.feedback === 'overpriced' ? 'bg-yellow-500/20 text-yellow-400' :
+          listing.feedback === 'good_deal' ? 'bg-emerald-500/20 text-emerald-400' :
+          'bg-zinc-700/50 text-zinc-400'
+        }`}>
+          {listing.feedback.replace('_', ' ')}
+        </span>
+      )}
+
+      {showFeedback ? (
+        <div className="space-y-2">
+          <div className="flex gap-1 flex-wrap">
+            {['scam', 'overpriced', 'wrong_product', 'accessory', 'good_deal', 'great_deal'].map((fb) => (
+              <button
+                key={fb}
+                onClick={() => {
+                  onFeedback(listing.id, fb, feedbackNote || undefined);
+                  setShowFeedback(false);
+                  setFeedbackNote('');
+                }}
+                className={`text-[10px] px-2 py-1 rounded transition-colors ${
+                  fb.includes('deal') ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30' :
+                  fb === 'scam' ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' :
+                  'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                }`}
+              >
+                {fb.replace('_', ' ')}
+              </button>
+            ))}
+          </div>
+          <input
+            type="text"
+            value={feedbackNote}
+            onChange={(e) => setFeedbackNote(e.target.value)}
+            placeholder="Optional note (why?)"
+            className="w-full bg-zinc-800 rounded px-2 py-1.5 text-[11px] border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+          />
+          <button onClick={() => setShowFeedback(false)} className="text-[10px] text-zinc-600">Cancel</button>
+        </div>
+      ) : showValueInput ? (
         <div className="flex gap-2 items-center">
           <span className="text-xs text-zinc-400">Worth $</span>
           <input
@@ -159,13 +209,21 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
               </>
             )}
           </div>
-          {/* Secondary: set value — only show as subtle link */}
-          <button
-            onClick={() => setShowValueInput(true)}
-            className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors"
-          >
-            Set market value
-          </button>
+          {/* Secondary actions */}
+          <div className="flex gap-3">
+            <button
+              onClick={() => setShowValueInput(true)}
+              className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors"
+            >
+              Set value
+            </button>
+            <button
+              onClick={() => setShowFeedback(true)}
+              className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors"
+            >
+              Feedback
+            </button>
+          </div>
         </div>
       )}
     </div>

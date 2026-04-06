@@ -20,8 +20,13 @@ interface NormalizedProduct {
  * Use AI to analyze a listing title — normalize product AND detect red flags.
  * One AI call does normalization + accessory/damage/rental detection.
  */
-async function normalizeProduct(title: string): Promise<NormalizedProduct | null> {
-  const prompt = `Analyze this marketplace listing title. Extract the product AND classify it.
+async function normalizeProduct(title: string, description?: string | null): Promise<NormalizedProduct | null> {
+  const descContext = description
+    ? `\nDescription: "${description.slice(0, 500)}"`
+    : '';
+
+  const prompt = `Analyze this marketplace listing. Extract the product AND classify it.
+Use BOTH the title and description (if provided) to identify the exact product model and specs.
 
 RULES:
 - baseModel: The core product. Brand + model + tier. NO storage, NO accessories, NO condition.
@@ -43,7 +48,7 @@ RULES:
 - isWanted: TRUE if "ISO", "in search of", "looking for", "wanted", "WTB"
 - skipReason: Brief reason if any flag is true, otherwise null
 
-Title: "${title}"
+Title: "${title}"${descContext}
 
 Return JSON only: {"baseModel":"...","storage":null,"isAccessory":false,"isDamaged":false,"isRental":false,"isWanted":false,"skipReason":null}`;
 
@@ -381,9 +386,9 @@ async function scoreUnscored(): Promise<void> {
 
   for (const listing of listings as Listing[]) {
     try {
-      // Normalize the product name + detect red flags
+      // Normalize the product name + detect red flags (use description if available)
       const categories = await getCategories(supabase);
-      const normalized = await normalizeProduct(listing.title);
+      const normalized = await normalizeProduct(listing.title, listing.raw_email_snippet);
       const productName = normalized?.baseModel ?? null;
       const storage = normalized?.storage ?? null;
       const category = listing.parsed_category ?? findCategorySync(listing.title, categories);
@@ -486,11 +491,20 @@ async function scoreUnscored(): Promise<void> {
         );
       }
 
+      // Build price source description
+      const priceSources = [];
+      if (intel?.price_ceiling) priceSources.push(`Your value: $${intel.price_ceiling}`);
+      if (manualPrice && !intel?.price_ceiling) priceSources.push(`Manual: $${manualPrice}`);
+      if (market && market.count >= 2) priceSources.push(`${market.count} observed, median $${market.median}`);
+      if (aiEstimate) priceSources.push(`AI estimate: $${aiEstimate}`);
+      const priceSource = priceSources.length > 0 ? priceSources.join(' · ') : null;
+
       await supabase
         .from('stc_listings')
         .update({
           score,
           estimated_profit: estimatedProfit,
+          price_source: priceSource,
           updated_at: new Date().toISOString(),
         })
         .eq('id', listing.id);
