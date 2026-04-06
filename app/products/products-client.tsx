@@ -26,6 +26,7 @@ export function ProductsClient({
   const [products] = useState(initial);
   const [intel, setIntel] = useState(initialIntel);
   const [search, setSearch] = useState('');
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
   const [editingProduct, setEditingProduct] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({
     notes: '',
@@ -45,8 +46,30 @@ export function ProductsClient({
       )
     : products;
 
-  // Sort by listing count descending
-  const sorted = [...filtered].sort((a, b) => b.listings - a.listings);
+  // Group by category
+  const grouped: Record<string, ProductSummary[]> = {};
+  for (const p of filtered) {
+    const cat = p.category ?? 'uncategorized';
+    if (!grouped[cat]) grouped[cat] = [];
+    grouped[cat].push(p);
+  }
+  // Sort products within each category by listing count
+  for (const cat of Object.keys(grouped)) {
+    grouped[cat].sort((a, b) => b.listings - a.listings);
+  }
+  // Sort categories by total listings
+  const sortedCategories = Object.entries(grouped).sort(
+    ([, a], [, b]) => b.reduce((s, p) => s + p.listings, 0) - a.reduce((s, p) => s + p.listings, 0)
+  );
+
+  function toggleCategory(cat: string) {
+    setCollapsedCategories(prev => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat);
+      else next.add(cat);
+      return next;
+    });
+  }
 
   function getIntel(productName: string): ProductIntel | undefined {
     return intel.find((i) => i.product_name === productName);
@@ -123,8 +146,31 @@ export function ProductsClient({
         className="w-full bg-zinc-900 rounded-lg px-3 py-2 text-sm border border-zinc-800 focus:border-emerald-500 focus:outline-none"
       />
 
-      <div className="space-y-2">
-        {sorted.map((product) => {
+      <div className="space-y-4">
+        {sortedCategories.map(([category, categoryProducts]) => {
+          const isCollapsed = collapsedCategories.has(category);
+          const totalListings = categoryProducts.reduce((s, p) => s + p.listings, 0);
+
+          return (
+            <div key={category}>
+              <button
+                onClick={() => toggleCategory(category)}
+                className="flex items-center justify-between w-full text-left py-2 px-1"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-500">{isCollapsed ? '▸' : '▾'}</span>
+                  <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide">
+                    {category}
+                  </h2>
+                  <span className="text-[10px] text-zinc-600">
+                    {categoryProducts.length} products &middot; {totalListings} listings
+                  </span>
+                </div>
+              </button>
+
+              {!isCollapsed && (
+                <div className="space-y-2">
+                  {categoryProducts.map((product) => {
           const pi = getIntel(product.name);
           const isEditing = editingProduct === product.name;
 
@@ -333,10 +379,15 @@ export function ProductsClient({
               )}
             </div>
           );
+                  })}
+                </div>
+              )}
+            </div>
+          );
         })}
       </div>
 
-      {sorted.length === 0 && (
+      {sortedCategories.length === 0 && (
         <p className="text-zinc-500 text-sm text-center py-8">
           No products identified yet. Listings will appear here once processed.
         </p>

@@ -7,37 +7,60 @@ import type { Listing, ListingScore } from '../lib/types';
 const supabase = createServiceClient();
 
 interface NormalizedProduct {
-  baseModel: string;   // e.g. "iPhone 13 Pro" — NO storage
+  baseModel: string;       // e.g. "iPhone 13 Pro" — NO storage
   storage: string | null;  // e.g. "128GB" or null
+  isAccessory: boolean;    // case, charger, band, adapter, etc.
+  isDamaged: boolean;      // cracked screen, for parts, broken
+  isRental: boolean;       // "for rent", "rental", etc.
+  isWanted: boolean;       // "ISO", "looking for", "wanted"
+  skipReason: string | null;
 }
 
 /**
- * Use AI to extract a normalized product name from a listing title.
- * Returns base model (for market comparison) and storage (as modifier) separately.
- * iPhone 13 Pro 128GB → { baseModel: "iPhone 13 Pro", storage: "128GB" }
+ * Use AI to analyze a listing title — normalize product AND detect red flags.
+ * One AI call does normalization + accessory/damage/rental detection.
  */
 async function normalizeProduct(title: string): Promise<NormalizedProduct | null> {
-  const prompt = `Parse this listing into a base product model and storage/capacity.
+  const prompt = `Analyze this marketplace listing title. Extract the product AND classify it.
 
 RULES:
-- baseModel: Brand + model + tier. NO storage. NO accessories. NO condition.
-  - Phones: "iPhone 13 Pro Max", "iPhone 16e", "Samsung Galaxy S24 Ultra"
+- baseModel: The core product. Brand + model + tier. NO storage, NO accessories, NO condition.
+  - Phones: "iPhone 13 Pro Max", "iPhone 16e"
   - Laptops: "MacBook Air 13 2017", "MacBook Pro 14 2023 M3"
-  - Tablets: "iPad Pro 12.9 5th Gen", "iPad Air 11 M2"
+  - Tablets: "iPad Pro 12.9 5th Gen"
   - ALWAYS include tier: Mini, Pro, Pro Max, Plus, e, Air, Ultra etc.
   - NEVER include storage in baseModel
-- storage: Just the capacity like "128GB", "256GB", "512GB", "1TB". null if not mentioned.
+- storage: Capacity like "128GB", "256GB". null if not mentioned.
+- isAccessory: TRUE if the listing is for an ACCESSORY, not the main product:
+  - Cases, covers, screen protectors, bands, straps, chargers, keyboards, pencils,
+    adapters, mounts, stands, docks, cables, headstraps, carrying cases, plates,
+    filament, nozzles, PEI plates, build plates, encoder rentals
+  - "Magic Keyboard for iPad" = accessory. "iPad Pro with Magic Keyboard" = NOT accessory (main product bundled)
+  - "Apple Vision Pro case" = accessory. "Apple Vision Pro" = NOT accessory
+  - "Bambu PEI plate" = accessory. "Bambu Lab X1C" = NOT accessory
+- isDamaged: TRUE if listing mentions damage, "for parts", "repair", "cracked screen", "cracked back", "broken", "doesn't work", "as-is"
+- isRental: TRUE if "rent", "rental", "for rent", "hourly", "per day"
+- isWanted: TRUE if "ISO", "in search of", "looking for", "wanted", "WTB"
+- skipReason: Brief reason if any flag is true, otherwise null
 
 Title: "${title}"
 
-Return JSON only: {"baseModel": "...", "storage": "..." or null}`;
+Return JSON only: {"baseModel":"...","storage":null,"isAccessory":false,"isDamaged":false,"isRental":false,"isWanted":false,"skipReason":null}`;
 
   try {
     const result = await parseWithAI(prompt);
     const cleaned = result.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
     const parsed = JSON.parse(cleaned);
     if (!parsed.baseModel || parsed.baseModel === 'unknown') return null;
-    return { baseModel: parsed.baseModel, storage: parsed.storage || null };
+    return {
+      baseModel: parsed.baseModel,
+      storage: parsed.storage || null,
+      isAccessory: parsed.isAccessory ?? false,
+      isDamaged: parsed.isDamaged ?? false,
+      isRental: parsed.isRental ?? false,
+      isWanted: parsed.isWanted ?? false,
+      skipReason: parsed.skipReason || null,
+    };
   } catch {
     return null;
   }
@@ -358,17 +381,12 @@ async function scoreUnscored(): Promise<void> {
 
   for (const listing of listings as Listing[]) {
     try {
-      // Normalize the product name (base model + storage separately)
+      // Normalize the product name + detect red flags
       const categories = await getCategories(supabase);
       const normalized = await normalizeProduct(listing.title);
       const productName = normalized?.baseModel ?? null;
       const storage = normalized?.storage ?? null;
       const category = listing.parsed_category ?? findCategorySync(listing.title, categories);
-
-      // Record this listing's price for future reference (by base model)
-      if (listing.asking_price && category && productName) {
-        await updateMarketPrices(productName, category, listing.asking_price);
-      }
 
       // Update parsed fields
       await supabase
@@ -379,6 +397,21 @@ async function scoreUnscored(): Promise<void> {
           parsed_category: category,
         })
         .eq('id', listing.id);
+
+      // Auto-pass on accessories, damaged, rentals, wanted posts
+      if (normalized && (normalized.isAccessory || normalized.isDamaged || normalized.isRental || normalized.isWanted)) {
+        await supabase
+          .from('stc_listings')
+          .update({ score: 'pass', estimated_profit: 0, updated_at: new Date().toISOString() })
+          .eq('id', listing.id);
+        console.log(`  [skip] ${normalized.skipReason ?? 'flagged'}: ${listing.title}`);
+        continue;
+      }
+
+      // Record this listing's price for future reference (by base model, skip accessories)
+      if (listing.asking_price && category && productName) {
+        await updateMarketPrices(productName, category, listing.asking_price);
+      }
 
       // If no asking price, can't score
       if (!listing.asking_price) {
@@ -462,9 +495,9 @@ async function scoreUnscored(): Promise<void> {
         })
         .eq('id', listing.id);
 
-      // Alert for good/great deals
-      if ((score === 'good' || score === 'great') && !listing.alert_sent) {
-        const priority = score === 'great' ? 5 : 4;
+      // Alert only for great deals (good deals are too noisy)
+      if (score === 'great' && !listing.alert_sent) {
+        const priority = 5;
 
         await sendAlert(
           `${score.toUpperCase()}: $${estimatedProfit} potential profit`,
