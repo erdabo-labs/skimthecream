@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "SkimTheCream",
+  "version": "1.0.0",
+  "description": "Monitor Facebook Marketplace and KSL for deals",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "https://www.ksl.com/*",
+    "https://classifieds.ksl.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.facebook.com/marketplace/*"
+      ],
+      "js": ["fb-scraper.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.ksl.com/classifieds/*",
+        "https://classifieds.ksl.com/*"
+      ],
+      "js": ["ksl-scraper.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "48": "icon.png",
+    "128": "icon.png"
+  }
+}
