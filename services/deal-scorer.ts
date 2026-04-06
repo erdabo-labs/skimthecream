@@ -35,52 +35,50 @@ async function analyzeProduct(
     ? `\nDescription: "${description.slice(0, 800)}"`
     : '';
 
-  const prompt = `Analyze this marketplace listing. Use ALL available context (title AND description) to build a complete picture.
+  const prompt = `You are analyzing a marketplace listing to decide if it's worth buying to flip for profit.
 
-WATCHED CATEGORIES (only score listings that fit one of these):
+STEP 1 — WHAT IS ACTUALLY BEING SOLD?
+Read the title and description carefully. Answer: what specific item(s) is the seller offering?
+- "Bambu P1S & X1C complete assembly and nozzles" → selling nozzles and hotend assemblies (parts), NOT printers
+- "iPhone 15 Pro 256GB" → selling an iPhone 15 Pro
+- "MacBook Pro with charger and case" → selling a MacBook Pro (charger/case are bundled extras)
+- "Canon EF 70-200mm lens hood" → selling a lens hood (accessory), NOT a lens
+- "iPad Pro Magic Keyboard" → selling a keyboard (accessory), NOT an iPad
+- The description often clarifies what's actually for sale — READ IT
+
+STEP 2 — Does it match any of these WATCHED CATEGORIES?
 ${categoryNames.map(c => `- ${c}`).join('\n')}
+If the item being sold doesn't fit any category, it's irrelevant (cars, furniture, drones, clothes, etc.)
 
-EXTRACTION RULES:
-- baseModel: Brand + model + tier + generation/year if known. NO storage. NO accessories.
-  - "Mac Studio M2 Max 2023", "iPhone 13 Pro Max", "MacBook Air 13 M3 2024"
-  - "Bambu Lab X1C", "Celestron NexStar 8SE"
-  - If the title says "MacBook Pro" but description says "2019 i7", the baseModel is "MacBook Pro 15 2019 i7"
-  - ALWAYS include tier: Mini, Pro, Pro Max, Plus, e, Air, Ultra, SE etc.
-  - NEVER include storage in baseModel
-- storage: "128GB", "512GB", "1TB", etc. null if not mentioned anywhere.
-- condition: Assess from ALL signals in title AND description:
-  - "new": sealed, BNIB, unopened, brand new
-  - "like_new": mint, excellent, barely used, open box, few months old
-  - "good": normal used, works great, no major issues mentioned
-  - "fair": scratches, dents, cosmetic damage, older battery, signs of wear
-  - "poor": significant damage, cracked screen/back but functional
-  - "parts": for parts, broken, doesn't turn on, water damage, repair
-  - "unknown": not enough info to judge
-- conditionNotes: Specific condition details from the listing. e.g. "screen cracked", "battery 82%", "minor scratches on back", "comes with box". null if nothing specific mentioned.
-- year: Production year or generation year. null if can't determine.
-- processor: CPU/chip. "M1", "M2 Pro", "M3 Max", "A17 Pro", "i7-10700". null if not mentioned.
-- isAccessory: TRUE if the listing is selling PARTS or ACCESSORIES, not a complete working product:
-  - Phone/tablet: cases, covers, screen protectors, chargers, cables, adapters, bands, straps, pencils, keyboards (standalone)
-  - 3D printers: nozzles, hotends, extruders, build plates, PEI plates, filament, spools, print heads, "complete assembly" (meaning hotend assembly, NOT a full printer), "assembly and nozzles", tool heads, bed surfaces
-  - Telescopes: eyepieces, filters, mounts (standalone), adapters, cases
-  - CRITICAL: If the title mentions PARTS like "nozzles", "assembly", "hotend", "extruder" alongside a printer model name, it's selling PARTS FOR that printer, not the printer itself. "Bambu P1S nozzles" = accessory. "Bambu P1S 3D printer" = NOT accessory.
-  - A title listing multiple models + parts (e.g. "P1S & X1C assembly and nozzles") = selling parts compatible with those models, NOT selling the printers
-  - FALSE for main products even if bundled with accessories. "iPad Pro with Magic Keyboard" = NOT accessory.
-- isDamaged: TRUE if "for parts", "broken", "doesn't work", "cracked screen", "water damage", "as-is". Note: cosmetic scratches alone = NOT damaged (that's condition:fair).
-- isRental: TRUE for "rent", "rental", "per day", "hourly"
-- isWanted: TRUE for "ISO", "WTB", "looking for", "wanted", "in search of"
-- isIrrelevant: TRUE if the listing does NOT fit ANY of the watched categories above. Cars, furniture, clothing, toys, non-tech items = irrelevant. Be strict: a "DJI drone" is irrelevant unless drones are a watched category.
-- skipReason: Brief reason if any flag is true. For irrelevant: "not in watched categories: [what it is]"
-- matchedCategory: Which watched category this listing belongs to. null if irrelevant.
+STEP 3 — Only if it's a relevant MAIN PRODUCT (not an accessory/part), extract details:
+- baseModel: Brand + model + tier + generation. NO storage. "MacBook Pro 14 M3 2023", "iPhone 15 Pro Max", "Bambu Lab X1C"
+  - Use description to fill in gaps: title "MacBook Pro" + description "2019 i7" = "MacBook Pro 15 2019 i7"
+- storage: "128GB", "512GB", etc. null if not mentioned
+- condition: new/like_new/good/fair/poor/parts/unknown — use ALL signals from title AND description
+- conditionNotes: specific details like "battery 82%", "scratch on back". null if none
+- year: production year. null if unknown
+- processor: "M1", "M3 Max", "A17 Pro", "i7-10700". null if not mentioned
+
+CLASSIFICATION:
+- isAccessory: TRUE if selling parts, accessories, add-ons, consumables — NOT a complete main product
+- isDamaged: TRUE if "for parts", "broken", "doesn't work", "water damage"
+- isRental: TRUE if "for rent", "rental", "per day"
+- isWanted: TRUE if "ISO", "WTB", "looking for", "wanted"
+- isIrrelevant: TRUE if doesn't match any watched category
+- skipReason: why it was flagged, null if none
+- matchedCategory: which watched category, null if irrelevant
 
 Title: "${title}"${descContext}
 
-Return JSON only: {"baseModel":"...","storage":null,"condition":"unknown","conditionNotes":null,"year":null,"processor":null,"isAccessory":false,"isDamaged":false,"isRental":false,"isWanted":false,"isIrrelevant":false,"skipReason":null,"matchedCategory":null}`;
+Return JSON only: {"whatIsBeingSold":"<1-line plain English>","baseModel":"...","storage":null,"condition":"unknown","conditionNotes":null,"year":null,"processor":null,"isAccessory":false,"isDamaged":false,"isRental":false,"isWanted":false,"isIrrelevant":false,"skipReason":null,"matchedCategory":null}`;
 
   try {
     const result = await parseWithAI(prompt);
     const cleaned = result.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
     const parsed = JSON.parse(cleaned);
+    if (parsed.whatIsBeingSold) {
+      console.log(`    AI sees: "${parsed.whatIsBeingSold}"`);
+    }
     if (!parsed.baseModel || parsed.baseModel === 'unknown') return null;
     return {
       baseModel: parsed.baseModel,
