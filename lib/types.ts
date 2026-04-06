@@ -59,6 +59,9 @@ export interface InventoryItem {
   sold_platform: string | null;
   fees: number | null;
   profit: number | null;
+  notes: string | null;
+  target_sell_price: number | null;
+  ai_estimated_value: number | null;
   status: InventoryStatus;
   created_at: string;
   updated_at: string;

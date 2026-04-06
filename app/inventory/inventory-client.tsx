@@ -23,10 +23,76 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
   const [soldPrice, setSoldPrice] = useState('');
   const [soldPlatform, setSoldPlatform] = useState('');
   const [fees, setFees] = useState('');
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [addName, setAddName] = useState('');
+  const [addPrice, setAddPrice] = useState('');
+  const [addDate, setAddDate] = useState(new Date().toISOString().split('T')[0]);
+  const [addSource, setAddSource] = useState('');
+  const [addNotes, setAddNotes] = useState('');
+  const [addTargetPrice, setAddTargetPrice] = useState('');
+  const [aiEstimate, setAiEstimate] = useState<{ quickSale: number; fairValue: number; patientPrice: number; notes: string } | null>(null);
+  const [estimating, setEstimating] = useState(false);
 
   const supabase = createBrowserClient();
 
   const filtered = tab === 'all' ? items : items.filter((i) => i.status === tab);
+
+  async function handleEstimateValue() {
+    if (!addName) return;
+    setEstimating(true);
+    try {
+      const res = await fetch('/api/estimate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          productName: addName,
+          purchasePrice: addPrice || null,
+          details: addNotes || null,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAiEstimate(data);
+      }
+    } catch {
+      // silently fail
+    }
+    setEstimating(false);
+  }
+
+  async function handleAddItem() {
+    if (!addName) return;
+
+    const { data, error } = await supabase
+      .from('stc_inventory')
+      .insert({
+        product_name: addName,
+        purchase_price: addPrice ? parseFloat(addPrice) : null,
+        purchase_date: addDate || null,
+        purchase_source: addSource || 'manual',
+        notes: addNotes || null,
+        target_sell_price: addTargetPrice ? parseFloat(addTargetPrice) : null,
+        ai_estimated_value: aiEstimate?.fairValue ?? null,
+        status: 'in_stock' as const,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Failed to add:', error.message);
+      return;
+    }
+
+    setItems((prev) => [data, ...prev]);
+    setShowAddForm(false);
+    setAddName('');
+    setAddPrice('');
+    setAddDate(new Date().toISOString().split('T')[0]);
+    setAddSource('');
+    setAddNotes('');
+    setAddTargetPrice('');
+    setAiEstimate(null);
+  }
 
   async function handleMarkSold(id: number) {
     const item = items.find((i) => i.id === id);
@@ -52,7 +118,7 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
     setItems((prev) =>
       prev.map((i) =>
         i.id === id
-          ? { ...i, sold_price: soldPriceNum, profit, status: 'sold' as const }
+          ? { ...i, sold_price: soldPriceNum, sold_date: new Date().toISOString().split('T')[0], sold_platform: soldPlatform, fees: feesNum, profit, status: 'sold' as const }
           : i
       )
     );
@@ -65,9 +131,7 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
 
   async function handleRemove(id: number) {
     const item = items.find((i) => i.id === id);
-    // Delete inventory item
     await supabase.from('stc_inventory').delete().eq('id', id);
-    // Reset the listing back to 'new' so it reappears in deals
     if (item?.listing_id) {
       await supabase.from('stc_listings').update({ status: 'new' }).eq('id', item.listing_id);
     }
@@ -92,9 +156,40 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
     { value: 'sold', label: 'Sold' },
   ];
 
+  const totalInvested = items.filter(i => i.status !== 'sold').reduce((sum, i) => sum + (i.purchase_price ?? 0), 0);
+  const totalProfit = items.filter(i => i.status === 'sold').reduce((sum, i) => sum + (i.profit ?? 0), 0);
+
   return (
     <div className="p-4 space-y-4">
-      <h1 className="text-2xl font-bold">Inventory</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Inventory</h1>
+        <button
+          onClick={() => setShowAddForm(true)}
+          className="text-sm px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
+        >
+          + Add Item
+        </button>
+      </div>
+
+      {/* Summary */}
+      {items.length > 0 && (
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-zinc-900/80 rounded-xl p-3 border border-zinc-800/50">
+            <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Items</p>
+            <p className="text-xl font-bold">{items.filter(i => i.status !== 'sold').length}</p>
+          </div>
+          <div className="bg-zinc-900/80 rounded-xl p-3 border border-zinc-800/50">
+            <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Invested</p>
+            <p className="text-xl font-bold">${totalInvested.toFixed(0)}</p>
+          </div>
+          <div className="bg-zinc-900/80 rounded-xl p-3 border border-zinc-800/50">
+            <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Profit</p>
+            <p className={`text-xl font-bold ${totalProfit > 0 ? 'text-emerald-400' : totalProfit < 0 ? 'text-red-400' : ''}`}>
+              ${totalProfit.toFixed(0)}
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="flex gap-1 bg-zinc-900 rounded-lg p-1">
         {tabs.map((t) => (
@@ -140,7 +235,7 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
                   </span>
                 </div>
 
-                <div className="flex gap-4 text-sm">
+                <div className="flex gap-4 text-sm flex-wrap">
                   <div>
                     <p className="text-zinc-500 text-xs">Paid</p>
                     <p className="font-semibold">
@@ -162,10 +257,22 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
                               : 'text-red-400'
                           }`}
                         >
-                          ${item.profit}
+                          {(item.profit ?? 0) >= 0 ? '+' : ''}${item.profit}
                         </p>
                       </div>
                     </>
+                  )}
+                  {item.status !== 'sold' && item.target_sell_price && (
+                    <div>
+                      <p className="text-zinc-500 text-xs">Target</p>
+                      <p className="font-semibold text-blue-400">${item.target_sell_price}</p>
+                    </div>
+                  )}
+                  {item.status !== 'sold' && item.ai_estimated_value && !item.target_sell_price && (
+                    <div>
+                      <p className="text-zinc-500 text-xs">AI Est.</p>
+                      <p className="font-semibold text-zinc-300">${item.ai_estimated_value}</p>
+                    </div>
                   )}
                   {item.status !== 'sold' && days !== null && (
                     <div>
@@ -176,6 +283,10 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
                     </div>
                   )}
                 </div>
+
+                {item.notes && (
+                  <p className="text-xs text-zinc-500 italic">{item.notes}</p>
+                )}
 
                 {item.status === 'in_stock' && (
                   <div className="flex gap-2">
@@ -216,13 +327,155 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
         </div>
       ) : (
         <p className="text-zinc-500 text-sm text-center py-8">
-          No inventory items in this category.
+          No inventory items{tab !== 'all' ? ' in this category' : ''}.
         </p>
       )}
 
-      {/* Sell modal */}
+      {/* Add Item Modal */}
+      {showAddForm && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60" onClick={(e) => { if (e.target === e.currentTarget) setShowAddForm(false); }}>
+          <div className="bg-zinc-900 rounded-t-2xl w-full max-w-lg p-6 space-y-4 pb-[env(safe-area-inset-bottom)]">
+            <h2 className="text-lg font-bold">Add Inventory Item</h2>
+
+            <div>
+              <label className="text-xs text-zinc-400 block mb-1">What is it?</label>
+              <input
+                type="text"
+                value={addName}
+                onChange={(e) => setAddName(e.target.value)}
+                className="w-full bg-zinc-800 rounded-lg px-3 py-2 text-sm border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                placeholder="Canon EF 70-200mm f/2.8L, Utility Trailer 5x8..."
+                autoFocus
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-zinc-400 block mb-1">Purchase Price</label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  value={addPrice}
+                  onChange={(e) => setAddPrice(e.target.value)}
+                  className="w-full bg-zinc-800 rounded-lg px-3 py-2 text-sm border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                  placeholder="0.00"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-zinc-400 block mb-1">Purchase Date</label>
+                <input
+                  type="date"
+                  value={addDate}
+                  onChange={(e) => setAddDate(e.target.value)}
+                  className="w-full bg-zinc-800 rounded-lg px-3 py-2 text-sm border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-zinc-400 block mb-1">Where did you buy it?</label>
+              <div className="flex gap-2 flex-wrap">
+                {['Facebook', 'KSL', 'eBay', 'Craigslist', 'Retail', 'Other'].map((src) => (
+                  <button
+                    key={src}
+                    onClick={() => setAddSource(src.toLowerCase())}
+                    className={`text-xs px-3 py-1.5 rounded-full transition-colors ${
+                      addSource === src.toLowerCase()
+                        ? 'bg-zinc-100 text-zinc-900 font-medium'
+                        : 'bg-zinc-800 text-zinc-400'
+                    }`}
+                  >
+                    {src}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-zinc-400 block mb-1">Details / Notes (helps AI estimate)</label>
+              <input
+                type="text"
+                value={addNotes}
+                onChange={(e) => setAddNotes(e.target.value)}
+                className="w-full bg-zinc-800 rounded-lg px-3 py-2 text-sm border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                placeholder="2023 model, good condition, includes accessories..."
+              />
+            </div>
+
+            {/* AI Estimate */}
+            <div className="space-y-2">
+              <button
+                onClick={handleEstimateValue}
+                disabled={!addName || estimating}
+                className="w-full text-xs py-2 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors border border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {estimating ? 'Estimating...' : 'Get AI Price Estimate'}
+              </button>
+
+              {aiEstimate && (
+                <div className="bg-zinc-800/50 rounded-lg p-3 border border-zinc-700/50 space-y-2">
+                  <div className="flex gap-3 text-sm">
+                    <div className="flex-1 text-center">
+                      <p className="text-[10px] text-zinc-500 uppercase">Quick Sale</p>
+                      <p className="font-bold text-amber-400">${aiEstimate.quickSale}</p>
+                    </div>
+                    <div className="flex-1 text-center">
+                      <p className="text-[10px] text-zinc-500 uppercase">Fair Value</p>
+                      <p className="font-bold text-emerald-400">${aiEstimate.fairValue}</p>
+                    </div>
+                    <div className="flex-1 text-center">
+                      <p className="text-[10px] text-zinc-500 uppercase">Patient</p>
+                      <p className="font-bold text-blue-400">${aiEstimate.patientPrice}</p>
+                    </div>
+                  </div>
+                  {aiEstimate.notes && (
+                    <p className="text-[11px] text-zinc-400 leading-tight">{aiEstimate.notes}</p>
+                  )}
+                  {addPrice && (
+                    <p className="text-[11px] text-zinc-500">
+                      Potential profit: <span className={`font-medium ${aiEstimate.fairValue - parseFloat(addPrice) > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {aiEstimate.fairValue - parseFloat(addPrice) >= 0 ? '+' : ''}${(aiEstimate.fairValue - parseFloat(addPrice)).toFixed(0)}
+                      </span>
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="text-xs text-zinc-400 block mb-1">Your target sell price (optional)</label>
+              <input
+                type="number"
+                inputMode="decimal"
+                value={addTargetPrice}
+                onChange={(e) => setAddTargetPrice(e.target.value)}
+                className="w-full bg-zinc-800 rounded-lg px-3 py-2 text-sm border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                placeholder={aiEstimate ? `AI suggests $${aiEstimate.fairValue}` : 'What do you hope to sell it for?'}
+              />
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                onClick={() => setShowAddForm(false)}
+                className="flex-1 text-sm py-2.5 rounded-lg bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleAddItem}
+                disabled={!addName}
+                className="flex-1 text-sm py-2.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Add to Inventory
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sell Modal */}
       {sellModal !== null && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60">
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60" onClick={(e) => { if (e.target === e.currentTarget) setSellModal(null); }}>
           <div className="bg-zinc-900 rounded-t-2xl w-full max-w-lg p-6 space-y-4 pb-[env(safe-area-inset-bottom)]">
             <h2 className="text-lg font-bold">Mark as Sold</h2>
 
@@ -235,22 +488,31 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
                 onChange={(e) => setSoldPrice(e.target.value)}
                 className="w-full bg-zinc-800 rounded-lg px-3 py-2 text-sm border border-zinc-700 focus:border-emerald-500 focus:outline-none"
                 placeholder="0.00"
+                autoFocus
               />
             </div>
 
             <div>
               <label className="text-xs text-zinc-400 block mb-1">Platform</label>
-              <input
-                type="text"
-                value={soldPlatform}
-                onChange={(e) => setSoldPlatform(e.target.value)}
-                className="w-full bg-zinc-800 rounded-lg px-3 py-2 text-sm border border-zinc-700 focus:border-emerald-500 focus:outline-none"
-                placeholder="Facebook, KSL, eBay..."
-              />
+              <div className="flex gap-2 flex-wrap">
+                {['Facebook', 'KSL', 'eBay', 'Craigslist', 'Other'].map((src) => (
+                  <button
+                    key={src}
+                    onClick={() => setSoldPlatform(src.toLowerCase())}
+                    className={`text-xs px-3 py-1.5 rounded-full transition-colors ${
+                      soldPlatform === src.toLowerCase()
+                        ? 'bg-zinc-100 text-zinc-900 font-medium'
+                        : 'bg-zinc-800 text-zinc-400'
+                    }`}
+                  >
+                    {src}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div>
-              <label className="text-xs text-zinc-400 block mb-1">Fees</label>
+              <label className="text-xs text-zinc-400 block mb-1">Fees (shipping, platform fees, etc.)</label>
               <input
                 type="number"
                 inputMode="decimal"
@@ -261,7 +523,7 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
               />
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2 pt-2">
               <button
                 onClick={() => setSellModal(null)}
                 className="flex-1 text-sm py-2.5 rounded-lg bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
