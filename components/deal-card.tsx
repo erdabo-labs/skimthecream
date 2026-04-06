@@ -109,42 +109,38 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
           )}
 
           {/* Main actions row */}
-          <div className="flex gap-2">
-            <button
-              onClick={() => onDismiss(listing.id)}
-              className="text-xs py-2 px-2 rounded-lg bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
-            >
-              Dismiss
-            </button>
-            <button
-              onClick={() => setShowValueInput(true)}
-              className="text-xs py-2 px-2 rounded-lg bg-zinc-800 text-yellow-400 hover:bg-zinc-700 transition-colors"
-            >
-              $Value
-            </button>
+          <div className="flex gap-1.5">
             {listing.listing_url && (
               <a
                 href={listing.listing_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-xs py-2 px-2 rounded-lg bg-zinc-800 text-blue-400 hover:bg-zinc-700 transition-colors text-center"
+                className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-blue-400 hover:bg-zinc-700 transition-colors text-center"
               >
                 View
               </a>
             )}
             {listing.status === 'new' && (
-              <button
-                onClick={() => onStatusChange(listing.id, 'contacted')}
-                className="flex-1 text-xs py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition-colors font-medium"
-              >
-                Contacting
-              </button>
+              <>
+                <button
+                  onClick={() => onStatusChange(listing.id, 'contacted')}
+                  className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-blue-400 hover:bg-zinc-700 transition-colors"
+                >
+                  Contacting
+                </button>
+                <button
+                  onClick={() => onDismiss(listing.id)}
+                  className="text-xs py-2 px-3 rounded-lg bg-zinc-800 text-zinc-500 hover:bg-zinc-700 transition-colors"
+                >
+                  Pass
+                </button>
+              </>
             )}
             {listing.status === 'contacted' && (
               <>
                 <a
                   href={`/negotiate/${listing.id}`}
-                  className="flex-1 text-xs py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-500 transition-colors font-medium text-center"
+                  className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-purple-400 hover:bg-zinc-700 transition-colors text-center"
                 >
                   Negotiate
                 </a>
@@ -154,10 +150,22 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
                 >
                   Bought
                 </button>
+                <button
+                  onClick={() => onDismiss(listing.id)}
+                  className="text-xs py-2 px-3 rounded-lg bg-zinc-800 text-zinc-500 hover:bg-zinc-700 transition-colors"
+                >
+                  Pass
+                </button>
               </>
             )}
-            {listing.status !== 'contacted' && listing.status !== 'new' ? null : null}
           </div>
+          {/* Secondary: set value — only show as subtle link */}
+          <button
+            onClick={() => setShowValueInput(true)}
+            className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors"
+          >
+            Set market value
+          </button>
         </div>
       )}
     </div>

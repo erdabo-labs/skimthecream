@@ -43,10 +43,12 @@
               continue;
             }
           }
-          // Title: first non-price, non-location line
+          // Title: first non-price, non-location, non-generic line
           if (!title && !line.match(/^\$/) && line.length > 3 && line.length < 200) {
             // Skip common non-title patterns
-            if (line.match(/^(Listed|mile|km|Free|·|\d+ mi)/i)) continue;
+            if (line.match(/^(Listed|Just listed|mile|km|Free|·|\d+ mi|New listing|See more|Marketplace)/i)) continue;
+            // Skip lines that are just numbers or very short generic text
+            if (line.match(/^\d+$/) || line.length < 5) continue;
             title = line;
           }
         }

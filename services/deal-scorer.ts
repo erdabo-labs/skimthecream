@@ -66,6 +66,30 @@ async function getProductIntel(productName: string): Promise<{
 }
 
 /**
+ * Ask AI to estimate the used local market value for a product.
+ * Used as a fallback when no observed data or manual price exists.
+ */
+async function estimateValueWithAI(productName: string): Promise<number | null> {
+  const prompt = `What is a fair used price for "${productName}" on Facebook Marketplace or local classifieds in the US?
+
+Consider:
+- Used/good condition (not new, not broken)
+- Local pickup, cash transaction
+- Current market (not retail, not eBay shipped prices — local used is typically 50-70% of retail)
+
+Return ONLY a single number (the dollar amount, no $ sign). If you can't estimate, return 0.`;
+
+  try {
+    const result = await parseWithAI(prompt);
+    const price = parseFloat(result.trim().replace(/[$,]/g, ''));
+    if (isNaN(price) || price <= 0) return null;
+    return Math.round(price);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Check if the user has set a manual market value for this product.
  * Manual prices have the highest trust — they reflect local market knowledge.
  */
@@ -92,21 +116,27 @@ async function getManualPrice(
 
 /**
  * Combine price signals into a weighted market value.
- * Manual price = highest trust, observed = fills gaps.
+ * Manual > observed > AI estimate. Weighted when multiple signals exist.
  */
 function computeMarketValue(
   manualPrice: number | null,
-  observed: { median: number; count: number } | null
+  observed: { median: number; count: number } | null,
+  aiEstimate: number | null = null
 ): number | null {
   const hasManual = manualPrice !== null;
   const hasObserved = observed !== null && observed.count >= 2;
+  const hasAI = aiEstimate !== null;
 
   if (hasManual && hasObserved) {
-    // Weight manual higher (60/40)
     return Math.round((manualPrice! * 0.6 + observed!.median * 0.4) * 100) / 100;
   }
   if (hasManual) return manualPrice;
+  if (hasObserved && hasAI) {
+    // Observed data + AI: trust observed more (70/30)
+    return Math.round((observed!.median * 0.7 + aiEstimate! * 0.3) * 100) / 100;
+  }
   if (hasObserved) return observed!.median;
+  if (hasAI) return aiEstimate;
   return null;
 }
 
@@ -363,12 +393,21 @@ async function scoreUnscored(): Promise<void> {
       // Get product intel (user context) if available
       const intel = productName ? await getProductIntel(productName) : null;
 
-      // Get market reference: user ceiling > manual price > observed listings
+      // Get market reference: user ceiling > manual price > observed > AI estimate
       const manualPrice = intel?.price_ceiling ?? await getManualPrice(productName ?? listing.title, category);
       const market = await getMarketPrice(productName ?? listing.title, category);
 
+      // If no manual or observed data, ask AI to estimate
+      let aiEstimate: number | null = null;
+      if (!manualPrice && (!market || market.count < 2) && productName) {
+        aiEstimate = await estimateValueWithAI(productName);
+        if (aiEstimate) {
+          console.log(`    AI estimate for ${productName}: $${aiEstimate}`);
+        }
+      }
+
       // Compute weighted market value from available signals
-      const marketValue = computeMarketValue(manualPrice, market);
+      const marketValue = computeMarketValue(manualPrice, market, aiEstimate);
 
       // Apply price floor check — user says "don't buy above this"
       if (intel?.price_floor && listing.asking_price > intel.price_floor) {
@@ -401,6 +440,7 @@ async function scoreUnscored(): Promise<void> {
         if (intel?.price_ceiling) sources.push(`ceiling $${intel.price_ceiling}`);
         if (manualPrice && !intel?.price_ceiling) sources.push(`manual $${manualPrice}`);
         if (market && market.count >= 2) sources.push(`observed $${market.median} (${market.count})`);
+        if (aiEstimate) sources.push(`AI $${aiEstimate}`);
         if (intel?.difficulty) sources.push(intel.difficulty);
         console.log(
           `  [${score}] ${listing.title} — $${listing.asking_price} vs market $${marketValue} (${sources.join(', ')}, ${discount.toFixed(0)}% off)`
