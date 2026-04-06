@@ -63,6 +63,17 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
     setFees('');
   }
 
+  async function handleRemove(id: number) {
+    const item = items.find((i) => i.id === id);
+    // Delete inventory item
+    await supabase.from('stc_inventory').delete().eq('id', id);
+    // Reset the listing back to 'new' so it reappears in deals
+    if (item?.listing_id) {
+      await supabase.from('stc_listings').update({ status: 'new' }).eq('id', item.listing_id);
+    }
+    setItems((prev) => prev.filter((i) => i.id !== id));
+  }
+
   async function handleMarkListed(id: number) {
     await supabase
       .from('stc_inventory')
@@ -184,12 +195,20 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
                 )}
 
                 {(item.status === 'in_stock' || item.status === 'listed') && (
-                  <button
-                    onClick={() => setSellModal(item.id)}
-                    className="w-full text-xs py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
-                  >
-                    Mark as Sold
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setSellModal(item.id)}
+                      className="flex-1 text-xs py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
+                    >
+                      Mark as Sold
+                    </button>
+                    <button
+                      onClick={() => handleRemove(item.id)}
+                      className="text-xs py-2 px-3 rounded-lg bg-zinc-800 text-red-400 hover:bg-red-500/20 transition-colors"
+                    >
+                      Remove
+                    </button>
+                  </div>
                 )}
               </div>
             );
