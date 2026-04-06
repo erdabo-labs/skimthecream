@@ -1,8 +1,9 @@
 // Content script for Facebook Marketplace pages
-// Extracts listing cards and sends them to the background worker
+// Extracts listing cards, fetches descriptions, and sends them to the background worker
 
 (function () {
   const SEEN_KEY = 'stc_seen_fb';
+  const DESC_FETCH_DELAY = 1500; // ms between detail page fetches to avoid rate limits
 
   function getSeen() {
     return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}');
@@ -20,6 +21,49 @@
       if (now - timestamp > week) delete seen[key];
     }
     localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+  }
+
+  function decodeHTMLEntities(text) {
+    const el = document.createElement('textarea');
+    el.innerHTML = text;
+    return el.value;
+  }
+
+  /**
+   * Fetch description from a FB listing detail page.
+   * Runs in content script context so it has the user's FB cookies.
+   */
+  async function fetchDescription(itemId) {
+    try {
+      const url = `https://www.facebook.com/marketplace/item/${itemId}/`;
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) return null;
+
+      const html = await res.text();
+
+      // Try og:description (most reliable, contains seller's description)
+      const ogMatch = html.match(/<meta\s+(?:property|name)="og:description"\s+content="([^"]*?)"/i)
+        || html.match(/<meta\s+content="([^"]*?)"\s+(?:property|name)="og:description"/i);
+      if (ogMatch && ogMatch[1] && ogMatch[1].length > 10) {
+        return decodeHTMLEntities(ogMatch[1]).slice(0, 1000);
+      }
+
+      // Fallback: description meta tag
+      const descMatch = html.match(/<meta\s+(?:property|name)="description"\s+content="([^"]*?)"/i)
+        || html.match(/<meta\s+content="([^"]*?)"\s+(?:property|name)="description"/i);
+      if (descMatch && descMatch[1] && descMatch[1].length > 10) {
+        return decodeHTMLEntities(descMatch[1]).slice(0, 1000);
+      }
+
+      return null;
+    } catch (err) {
+      console.log(`[STC] Failed to fetch description for ${itemId}:`, err.message);
+      return null;
+    }
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   function extractListings() {
@@ -73,23 +117,15 @@
 
         if (!title) continue;
 
-        // Clean the URL
         const cleanUrl = `https://www.facebook.com/marketplace/item/${itemId}/`;
-
-        // Grab extra text from the card as description snippet
-        const allText = lines.filter(l =>
-          l !== title &&
-          !l.match(/^\$/) &&
-          !l.match(/^(Listed|Just listed|mile|km|·|\d+ mi|See more|Marketplace)/i)
-        ).join(' ').slice(0, 300);
 
         listings.push({
           source: 'facebook',
           source_id: sourceId,
+          itemId,
           title,
           price,
           url: cleanUrl,
-          snippet: allText || null,
         });
       } catch (err) {
         console.error('[STC] Error parsing FB listing:', err);
@@ -99,27 +135,45 @@
     return listings;
   }
 
-  // Wait for dynamic content to load, then scrape
-  function run() {
+  // Fetch descriptions and send to background worker
+  async function run() {
     const listings = extractListings();
-    if (listings.length > 0) {
-      console.log(`[STC] Found ${listings.length} new FB listings`);
-      chrome.runtime.sendMessage(
-        { type: 'LISTINGS_FOUND', listings },
-        (response) => {
-          if (response && response.inserted > 0) {
-            // Only mark as seen after successful ingest
-            const ingestedIds = response.ingestedIds || listings.map(l => l.source_id);
-            markSeen(ingestedIds);
-            console.log(`[STC] Ingested: ${response.inserted}, skipped: ${response.skipped}`);
-          } else if (response) {
-            console.log(`[STC] Skipped all ${response.skipped}`);
-          }
-        }
-      );
-    } else {
+    if (listings.length === 0) {
       console.log('[STC] No new FB listings');
+      return;
     }
+
+    console.log(`[STC] Found ${listings.length} new FB listings, fetching descriptions...`);
+
+    // Fetch descriptions from detail pages (with rate limiting)
+    for (let i = 0; i < listings.length; i++) {
+      const listing = listings[i];
+      const desc = await fetchDescription(listing.itemId);
+      listing.snippet = desc;
+      if (desc) {
+        console.log(`[STC] Got description for ${listing.title.slice(0, 40)}: ${desc.slice(0, 80)}...`);
+      }
+      // Rate limit between fetches (skip delay on last item)
+      if (i < listings.length - 1) {
+        await sleep(DESC_FETCH_DELAY);
+      }
+    }
+
+    // Clean up itemId before sending (not needed by background)
+    const toSend = listings.map(({ itemId, ...rest }) => rest);
+
+    chrome.runtime.sendMessage(
+      { type: 'LISTINGS_FOUND', listings: toSend },
+      (response) => {
+        if (response && response.inserted > 0) {
+          const ingestedIds = response.ingestedIds || listings.map(l => l.source_id);
+          markSeen(ingestedIds);
+          console.log(`[STC] Ingested: ${response.inserted}, skipped: ${response.skipped}`);
+        } else if (response) {
+          console.log(`[STC] Skipped all ${response.skipped}`);
+        }
+      }
+    );
   }
 
   // Initial run after page settles
