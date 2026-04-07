@@ -6,6 +6,62 @@ import type { Listing, ListingScore } from '../lib/types';
 
 const supabase = createServiceClient();
 
+/**
+ * Fetch description from a listing URL.
+ * The scorer runs on the local MacBook so it has full network access.
+ */
+async function fetchDescription(url: string, source: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'text/html',
+      },
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    // Try og:description first
+    const ogMatch = html.match(/<meta\s+(?:property|name)="og:description"\s+content="([^"]*?)"/i)
+      || html.match(/<meta\s+content="([^"]*?)"\s+(?:property|name)="og:description"/i);
+    if (ogMatch?.[1] && ogMatch[1].length > 10) {
+      return ogMatch[1]
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&#39;/g, "'")
+        .slice(0, 1000);
+    }
+
+    // Fallback: description meta
+    const descMatch = html.match(/<meta\s+(?:property|name)="description"\s+content="([^"]*?)"/i)
+      || html.match(/<meta\s+content="([^"]*?)"\s+(?:property|name)="description"/i);
+    if (descMatch?.[1] && descMatch[1].length > 10) {
+      return descMatch[1]
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&#39;/g, "'")
+        .slice(0, 1000);
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load known products we've seen before so AI can match against real data.
+ */
+async function getKnownProducts(): Promise<string[]> {
+  const { data } = await supabase
+    .from('stc_market_prices')
+    .select('product_name')
+    .not('product_name', 'is', null)
+    .order('sample_size', { ascending: false })
+    .limit(100);
+
+  if (!data) return [];
+  return [...new Set(data.map(d => d.product_name))];
+}
+
 interface ProductAnalysis {
   baseModel: string;       // e.g. "Mac Studio M2 Max 2023"
   storage: string | null;  // e.g. "512GB"
@@ -29,10 +85,15 @@ interface ProductAnalysis {
 async function analyzeProduct(
   title: string,
   description: string | null,
-  categoryNames: string[]
+  categoryNames: string[],
+  knownProducts: string[]
 ): Promise<ProductAnalysis | null> {
   const descContext = description
     ? `\nDescription: "${description.slice(0, 800)}"`
+    : '';
+
+  const knownContext = knownProducts.length > 0
+    ? `\n\nKNOWN PRODUCTS IN OUR DATABASE (match to these when possible):\n${knownProducts.slice(0, 50).join(', ')}`
     : '';
 
   const prompt = `You are analyzing a marketplace listing to decide if it's worth buying to flip for profit.
@@ -68,7 +129,13 @@ CLASSIFICATION:
 - skipReason: why it was flagged, null if none
 - matchedCategory: which watched category, null if irrelevant
 
-Title: "${title}"${descContext}
+Title: "${title}"${descContext}${knownContext}
+
+IMPORTANT:
+- If the description mentions cracked, broken, shattered, damaged, dents, water damage, or "for parts" — isDamaged MUST be true
+- If the title is vague (e.g. "Just listed", single word, no product name) and there's no description — set baseModel to "unknown"
+- If you can match to a known product from our database, use that exact name as baseModel
+- condition should reflect the WORST signal from title OR description. "Great condition" in title but "cracked glass" in description = "poor"
 
 Return JSON only: {"whatIsBeingSold":"<1-line plain English>","baseModel":"...","storage":null,"condition":"unknown","conditionNotes":null,"year":null,"processor":null,"isAccessory":false,"isDamaged":false,"isRental":false,"isWanted":false,"isIrrelevant":false,"skipReason":null,"matchedCategory":null}`;
 
@@ -417,14 +484,40 @@ async function scoreUnscored(): Promise<void> {
 
   console.log(`Found ${listings.length} unscored listings`);
 
-  // Load watched categories for relevance checking
+  // Load watched categories and known products
   const categories = await getCategories(supabase);
   const categoryNames = categories.map(c => `${c.name} (keywords: ${c.keywords.join(', ')})`);
+  const knownProducts = await getKnownProducts();
+  console.log(`Loaded ${knownProducts.length} known products for matching`);
 
   for (const listing of listings as Listing[]) {
     try {
+      // Skip obviously garbage titles
+      const titleLower = listing.title.toLowerCase().trim();
+      if (titleLower === 'just listed' || titleLower.length < 4) {
+        await supabase
+          .from('stc_listings')
+          .update({ score: 'pass', estimated_profit: 0, status: 'dismissed', feedback: 'irrelevant', feedback_note: 'no product info in title', updated_at: new Date().toISOString() })
+          .eq('id', listing.id);
+        console.log(`  [dismissed] garbage title: "${listing.title}"`);
+        continue;
+      }
+
+      // Fetch description if we don't have one
+      let description = listing.raw_email_snippet;
+      if (!description && listing.listing_url) {
+        description = await fetchDescription(listing.listing_url, listing.source);
+        if (description) {
+          await supabase
+            .from('stc_listings')
+            .update({ raw_email_snippet: description })
+            .eq('id', listing.id);
+          console.log(`  [fetched desc] ${listing.title.slice(0, 40)}: ${description.slice(0, 80)}...`);
+        }
+      }
+
       // Deep analysis: relevance + normalization + condition + specs
-      const analysis = await analyzeProduct(listing.title, listing.raw_email_snippet, categoryNames);
+      const analysis = await analyzeProduct(listing.title, description, categoryNames, knownProducts);
 
       if (!analysis) {
         await supabase
@@ -543,12 +636,23 @@ async function scoreUnscored(): Promise<void> {
       let score: ListingScore;
       let estimatedProfit: number;
 
+      // Determine pricing confidence
+      const hasHardData = !!manualPrice || (market && market.count >= 2);
+      const aiOnly = !hasHardData && !!aiEstimate;
+
       if (marketValue) {
         const discount = ((marketValue - listing.asking_price) / marketValue) * 100;
         const sellFactor = intel?.difficulty === 'hard' ? 0.85 : intel?.difficulty === 'moderate' ? 0.90 : 0.95;
         estimatedProfit = Math.round((marketValue * sellFactor - listing.asking_price) * 100) / 100;
 
-        if (discount >= 30 && estimatedProfit >= 200) {
+        if (aiOnly) {
+          // AI-only pricing: be skeptical. Never "great", higher bar for "good"
+          if (discount >= 35 && estimatedProfit >= 150) {
+            score = 'good'; // Cap at good — AI estimates can be way off
+          } else {
+            score = 'pass';
+          }
+        } else if (discount >= 30 && estimatedProfit >= 200) {
           score = 'great';
         } else if (discount >= 15 && estimatedProfit >= 50) {
           score = 'good';
@@ -564,6 +668,7 @@ async function scoreUnscored(): Promise<void> {
         if (analysis.condition !== 'unknown') sources.push(`cond:${analysis.condition}`);
         if (condMult !== 1.0) sources.push(`×${condMult}`);
         if (intel?.difficulty) sources.push(intel.difficulty);
+        if (aiOnly) sources.push('AI-ONLY⚠️');
         console.log(
           `  [${score}] ${listing.title} — $${listing.asking_price} vs $${marketValue} (${sources.join(', ')}, ${discount.toFixed(0)}% off, profit $${estimatedProfit})`
         );
