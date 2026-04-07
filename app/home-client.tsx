@@ -27,8 +27,19 @@ export function HomeClient({ active: initialActive, hot: initialHot, recent: ini
   const [showAllRecent, setShowAllRecent] = useState(false);
   const [scoreFilter, setScoreFilter] = useState<'all' | ListingScore>('all');
   const [sourceFilter, setSourceFilter] = useState<'all' | 'facebook' | 'ksl'>('all');
+  const [search, setSearch] = useState('');
 
   const supabase = createBrowserClient();
+
+  // Search filter — applies across all sections
+  function matchesSearch(listing: DealListing): boolean {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return (
+      listing.title.toLowerCase().includes(q) ||
+      (listing.parsed_product?.toLowerCase().includes(q) ?? false)
+    );
+  }
 
   // Combine all listings for mutation handlers
   function removeFromAll(id: number) {
@@ -111,6 +122,7 @@ export function HomeClient({ active: initialActive, hot: initialHot, recent: ini
 
   // Filter recent listings
   const filteredRecent = recent.filter((l) => {
+    if (!matchesSearch(l)) return false;
     if (scoreFilter !== 'all' && l.score !== scoreFilter) return false;
     if (sourceFilter !== 'all' && l.source !== sourceFilter) return false;
     return true;
@@ -120,8 +132,20 @@ export function HomeClient({ active: initialActive, hot: initialHot, recent: ini
 
   const cardProps = { onDismiss: handleDismiss, onPurchase: handlePurchase, onStatusChange: handleStatusChange, onSetValue: handleSetValue, onFeedback: handleFeedback };
 
+  const filteredActive = active.filter(matchesSearch);
+  const filteredHot = hot.filter(matchesSearch);
+
   return (
     <div className="p-4 space-y-6">
+      {/* Search */}
+      <input
+        type="text"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Search listings..."
+        className="w-full bg-zinc-900 rounded-lg px-3 py-2 text-sm border border-zinc-800 focus:border-emerald-500 focus:outline-none placeholder-zinc-600"
+      />
+
       {/* Stats */}
       <div className="grid grid-cols-4 gap-2">
         <StatCard label="Today" value={stats.dealsToday} />
@@ -131,13 +155,13 @@ export function HomeClient({ active: initialActive, hot: initialHot, recent: ini
       </div>
 
       {/* Active conversations */}
-      {active.length > 0 && (
+      {filteredActive.length > 0 && (
         <section>
           <h2 className="text-sm font-semibold text-blue-400 uppercase tracking-wider mb-2">
-            Active Conversations ({active.length})
+            Active Conversations ({filteredActive.length})
           </h2>
           <div className="space-y-2">
-            {active.map((listing) => (
+            {filteredActive.map((listing) => (
               <DealCard key={listing.id} listing={listing} {...cardProps} />
             ))}
           </div>
@@ -145,13 +169,13 @@ export function HomeClient({ active: initialActive, hot: initialHot, recent: ini
       )}
 
       {/* Hot deals */}
-      {hot.length > 0 && (
+      {filteredHot.length > 0 && (
         <section>
           <h2 className="text-sm font-semibold text-emerald-400 uppercase tracking-wider mb-2">
-            Hot Deals ({hot.length})
+            Hot Deals ({filteredHot.length})
           </h2>
           <div className="space-y-2">
-            {hot.map((listing) => (
+            {filteredHot.map((listing) => (
               <DealCard key={listing.id} listing={listing} {...cardProps} />
             ))}
           </div>
