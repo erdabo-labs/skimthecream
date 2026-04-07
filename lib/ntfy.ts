@@ -17,8 +17,20 @@ export async function sendAlert(
     priority,
   };
 
+  // Click opens the listing directly
   if (clickUrl) {
     payload.click = clickUrl;
+  }
+
+  // Action buttons: View Listing + Open in App
+  const actions: Record<string, string>[] = [];
+  if (clickUrl) {
+    actions.push({ action: 'view', label: 'View Listing', url: clickUrl });
+  }
+  actions.push({ action: 'view', label: 'Open App', url: 'https://skimthecream.vercel.app/' });
+
+  if (actions.length > 0) {
+    payload.actions = actions;
   }
 
   const res = await fetch('https://ntfy.sh', {
