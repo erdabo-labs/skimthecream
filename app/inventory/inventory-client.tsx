@@ -333,8 +333,8 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
 
       {/* Add Item Modal */}
       {showAddForm && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60" onClick={(e) => { if (e.target === e.currentTarget) setShowAddForm(false); }}>
-          <div className="bg-zinc-900 rounded-t-2xl w-full max-w-lg p-6 space-y-4 pb-[env(safe-area-inset-bottom)] max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 bg-zinc-950 overflow-y-auto overscroll-none">
+          <div className="w-full max-w-lg mx-auto p-4 pb-8 space-y-4">
             <h2 className="text-lg font-bold">Add Inventory Item</h2>
 
             <div>
@@ -475,8 +475,8 @@ export function InventoryClient({ items: initial }: { items: InventoryItem[] }) 
 
       {/* Sell Modal */}
       {sellModal !== null && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60" onClick={(e) => { if (e.target === e.currentTarget) setSellModal(null); }}>
-          <div className="bg-zinc-900 rounded-t-2xl w-full max-w-lg p-6 space-y-4 pb-[env(safe-area-inset-bottom)] max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 bg-zinc-950 overflow-y-auto overscroll-none">
+          <div className="w-full max-w-lg mx-auto p-4 pb-8 space-y-4">
             <h2 className="text-lg font-bold">Mark as Sold</h2>
 
             <div>
