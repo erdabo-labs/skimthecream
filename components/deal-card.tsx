@@ -2,14 +2,15 @@
 
 import { useState } from 'react';
 import { ScoreBadge } from './score-badge';
+import { cleanDescription } from '@/lib/utils';
 import type { Listing, ListingScore } from '@/lib/types';
 
 interface DealCardProps {
-  listing: Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category' | 'price_source' | 'feedback'>;
+  listing: Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category' | 'price_source' | 'feedback' | 'product_id' | 'raw_email_snippet'>;
   onDismiss: (id: number) => void;
   onPurchase: (id: number) => void;
   onStatusChange: (id: number, status: string) => void;
-  onSetValue: (id: number, productName: string, category: string | null, value: number) => void;
+  onSetValue: (id: number, productId: number | null, value: number) => void;
   onFeedback: (id: number, feedback: string, note?: string) => void;
   compact?: boolean;
 }
@@ -44,7 +45,7 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
   function handleSetValue() {
     const val = parseFloat(valueInput);
     if (isNaN(val) || val <= 0) return;
-    onSetValue(listing.id, listing.parsed_product ?? listing.title, listing.parsed_category ?? null, val);
+    onSetValue(listing.id, listing.product_id ?? null, val);
     setShowValueInput(false);
     setValueInput('');
   }
@@ -124,6 +125,14 @@ export function DealCard({ listing, onDismiss, onPurchase, onStatusChange, onSet
       {listing.price_source && (
         <p className="text-[10px] text-zinc-600 leading-tight">{listing.price_source}</p>
       )}
+
+      {/* Description */}
+      {listing.raw_email_snippet && (() => {
+        const desc = cleanDescription(listing.raw_email_snippet);
+        return desc ? (
+          <p className="text-[11px] text-zinc-500 leading-relaxed whitespace-pre-line">{desc}</p>
+        ) : null;
+      })()}
 
       {/* Feedback badge */}
       {listing.feedback && (

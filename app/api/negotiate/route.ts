@@ -7,10 +7,10 @@ export async function POST(req: NextRequest) {
 
   const supabase = createServerClient();
 
-  // Fetch listing + market data
+  // Fetch listing
   const { data: listing } = await supabase
     .from('stc_listings')
-    .select('*, stc_market_prices(*)')
+    .select('*')
     .eq('id', listingId)
     .single();
 
@@ -18,21 +18,21 @@ export async function POST(req: NextRequest) {
     return new Response('Listing not found', { status: 404 });
   }
 
-  const marketPrice = listing.stc_market_prices;
-  const avgPrice = marketPrice?.avg_sold_price ?? 'unknown';
-  const lowPrice = marketPrice?.low_sold_price ?? 'unknown';
-  const highPrice = marketPrice?.high_sold_price ?? 'unknown';
+  // Fetch product data if linked
+  let product = null;
+  if (listing.product_id) {
+    const { data } = await supabase
+      .from('stc_products')
+      .select('*')
+      .eq('id', listing.product_id)
+      .single();
+    product = data;
+  }
 
-  // Get product intel if available
-  const { data: intel } = await supabase
-    .from('stc_product_intel')
-    .select('notes, difficulty, price_floor, price_ceiling')
-    .eq('product_name', listing.parsed_product ?? '')
-    .limit(1);
-
-  const productNotes = intel?.[0]?.notes ?? '';
-  const maxBuy = intel?.[0]?.price_floor ?? '';
-  const worthPrice = intel?.[0]?.price_ceiling ?? avgPrice;
+  const worthPrice = product?.target_buy_price ?? product?.ai_market_value ?? 'unknown';
+  const lowPrice = product?.low_price ?? 'unknown';
+  const highPrice = product?.high_price ?? 'unknown';
+  const productNotes = product?.notes ?? '';
 
   const systemPrompt = `You are a negotiation coach helping buy "${listing.title}" on ${listing.source === 'facebook' ? 'Facebook Marketplace' : 'KSL Classifieds'}.
 
@@ -40,8 +40,9 @@ Key facts:
 - Asking price: $${listing.asking_price}
 - What it's actually worth locally: $${worthPrice}
 - Market range observed: $${lowPrice} - $${highPrice}
-${maxBuy ? `- Maximum I should pay: $${maxBuy}` : ''}
+${product?.target_buy_price ? `- Maximum I should pay: $${product.target_buy_price}` : ''}
 ${productNotes ? `- Product notes: ${productNotes}` : ''}
+${product?.ease_rating ? `- Sell difficulty: ${product.ease_rating}` : ''}
 
 How to help me:
 - When I ask for an opening message, write something I can COPY AND PASTE directly to the seller
@@ -55,7 +56,6 @@ How to help me:
 - Factor in condition, battery health, storage, or other details I mention
 
 IMPORTANT: When suggesting messages to send, format them in a quotation block so they're easy to copy. Keep them 1-3 sentences max.`;
-
 
   const stream = await chatWithAI(systemPrompt, messages);
 

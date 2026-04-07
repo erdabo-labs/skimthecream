@@ -45,14 +45,14 @@
       const ogMatch = html.match(/<meta\s+(?:property|name)="og:description"\s+content="([^"]*?)"/i)
         || html.match(/<meta\s+content="([^"]*?)"\s+(?:property|name)="og:description"/i);
       if (ogMatch && ogMatch[1] && ogMatch[1].length > 10) {
-        return decodeHTMLEntities(ogMatch[1]).slice(0, 1000);
+        return decodeHTMLEntities(ogMatch[1]).slice(0, 3000);
       }
 
       // Fallback: description meta tag
       const descMatch = html.match(/<meta\s+(?:property|name)="description"\s+content="([^"]*?)"/i)
         || html.match(/<meta\s+content="([^"]*?)"\s+(?:property|name)="description"/i);
       if (descMatch && descMatch[1] && descMatch[1].length > 10) {
-        return decodeHTMLEntities(descMatch[1]).slice(0, 1000);
+        return decodeHTMLEntities(descMatch[1]).slice(0, 3000);
       }
 
       return null;

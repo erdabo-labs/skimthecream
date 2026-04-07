@@ -1,15 +1,32 @@
-export interface MarketPrice {
+export type ProductStatus = 'pending' | 'active' | 'inactive';
+export type ProductConfidence = 'low' | 'medium' | 'high' | 'very_high';
+export type SellVelocity = 'fast' | 'moderate' | 'slow';
+export type EaseRating = 'easy' | 'moderate' | 'hard';
+
+export interface Product {
   id: number;
-  category: string;
-  product_name: string;
-  condition: string;
-  avg_sold_price: number | null;
-  low_sold_price: number | null;
-  high_sold_price: number | null;
-  source: string;
-  sample_size: number;
-  scraped_at: string;
-  manual_override: boolean;
+  canonical_name: string;
+  brand: string | null;
+  model_line: string | null;
+  tier: string | null;
+  generation: string | null;
+  status: ProductStatus;
+  first_seen_at: string;
+  listing_count: number;
+  avg_asking_price: number | null;
+  median_asking_price: number | null;
+  low_price: number | null;
+  high_price: number | null;
+  target_buy_price: number | null;
+  ai_market_value: number | null;
+  avg_days_to_sell: number | null;
+  sell_velocity: SellVelocity | null;
+  avg_profit: number | null;
+  times_sold: number;
+  ease_rating: EaseRating | null;
+  confidence: ProductConfidence;
+  notes: string | null;
+  last_refreshed: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -27,11 +44,11 @@ export interface Listing {
   parsed_category: string | null;
   parsed_product: string | null;
   parsed_condition: string | null;
-  market_price_id: number | null;
+  parsed_storage: string | null;
+  product_id: number | null;
   estimated_profit: number | null;
   score: ListingScore | null;
   status: ListingStatus;
-  parsed_storage: string | null;
   price_source: string | null;
   feedback: string | null;
   feedback_note: string | null;
@@ -50,6 +67,7 @@ export type InventoryStatus = 'in_stock' | 'listed' | 'sold';
 export interface InventoryItem {
   id: number;
   listing_id: number | null;
+  product_id: number | null;
   product_name: string;
   purchase_price: number | null;
   purchase_date: string | null;
@@ -67,28 +85,12 @@ export interface InventoryItem {
   updated_at: string;
 }
 
-export interface ProductIntel {
+export interface BrandRule {
   id: number;
-  product_name: string;
-  category: string | null;
+  brand: string;
+  max_age_years: number | null;
+  auto_approve: boolean;
   notes: string | null;
-  difficulty: 'easy' | 'moderate' | 'hard' | null;
-  storage_matters: boolean;
-  battery_matters: boolean;
-  price_floor: number | null;
-  price_ceiling: number | null;
-  tags: string[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface Category {
-  id: number;
-  slug: string;
-  name: string;
-  keywords: string[];
-  avg_days_to_sell: number;
-  active: boolean;
   created_at: string;
   updated_at: string;
 }

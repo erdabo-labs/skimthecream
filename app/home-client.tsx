@@ -6,7 +6,7 @@ import { StatCard } from '@/components/stat-card';
 import { createBrowserClient } from '@/lib/supabase/client';
 import type { Listing, ListingScore } from '@/lib/types';
 
-type DealListing = Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category' | 'price_source' | 'feedback'>;
+type DealListing = Pick<Listing, 'id' | 'title' | 'asking_price' | 'estimated_profit' | 'score' | 'source' | 'listing_url' | 'status' | 'created_at' | 'parsed_product' | 'parsed_category' | 'price_source' | 'feedback' | 'product_id' | 'raw_email_snippet'>;
 
 interface Props {
   active: DealListing[];
@@ -87,19 +87,16 @@ export function HomeClient({ active: initialActive, hot: initialHot, recent: ini
     removeFromAll(id);
   }
 
-  async function handleSetValue(id: number, productName: string, category: string | null, value: number) {
-    await supabase.from('stc_market_prices').upsert({
-      category: category ?? 'uncategorized',
-      product_name: productName,
-      condition: 'mixed',
-      avg_sold_price: value,
-      source: 'manual',
-      manual_override: true,
-      sample_size: 1,
-      scraped_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'category,product_name' });
+  async function handleSetValue(id: number, productId: number | null, value: number) {
+    // Update the product's target_buy_price if we have a product_id
+    if (productId) {
+      await supabase.from('stc_products').update({
+        target_buy_price: value,
+        updated_at: new Date().toISOString(),
+      }).eq('id', productId);
+    }
 
+    // Re-score this listing against the new target
     const askingPrice = [...active, ...hot, ...recent].find(l => l.id === id)?.asking_price ?? 0;
     const discount = ((value - askingPrice) / value) * 100;
     const estimatedProfit = Math.round((value * 0.95 - askingPrice) * 100) / 100;

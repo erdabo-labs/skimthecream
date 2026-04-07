@@ -1,8 +1,7 @@
 import { createServiceClient } from '../lib/supabase/service';
 import { parseWithAI } from '../lib/openai';
 import { sendAlert } from '../lib/ntfy';
-import { getCategories, findCategorySync } from '../lib/constants';
-import type { Listing, ListingScore } from '../lib/types';
+import type { Listing, ListingScore, Product } from '../lib/types';
 
 const supabase = createServiceClient();
 
@@ -10,7 +9,7 @@ const supabase = createServiceClient();
  * Fetch description from a listing URL.
  * The scorer runs on the local MacBook so it has full network access.
  */
-async function fetchDescription(url: string, source: string): Promise<string | null> {
+async function fetchDescription(url: string): Promise<string | null> {
   try {
     const res = await fetch(url, {
       headers: {
@@ -21,147 +20,25 @@ async function fetchDescription(url: string, source: string): Promise<string | n
     if (!res.ok) return null;
     const html = await res.text();
 
-    // Try og:description first
     const ogMatch = html.match(/<meta\s+(?:property|name)="og:description"\s+content="([^"]*?)"/i)
       || html.match(/<meta\s+content="([^"]*?)"\s+(?:property|name)="og:description"/i);
     if (ogMatch?.[1] && ogMatch[1].length > 10) {
       return ogMatch[1]
         .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
         .replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&#39;/g, "'")
-        .slice(0, 1000);
+        .slice(0, 3000);
     }
 
-    // Fallback: description meta
     const descMatch = html.match(/<meta\s+(?:property|name)="description"\s+content="([^"]*?)"/i)
       || html.match(/<meta\s+content="([^"]*?)"\s+(?:property|name)="description"/i);
     if (descMatch?.[1] && descMatch[1].length > 10) {
       return descMatch[1]
         .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
         .replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&#39;/g, "'")
-        .slice(0, 1000);
+        .slice(0, 3000);
     }
 
     return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Load known products we've seen before so AI can match against real data.
- */
-async function getKnownProducts(): Promise<string[]> {
-  const { data } = await supabase
-    .from('stc_market_prices')
-    .select('product_name')
-    .not('product_name', 'is', null)
-    .order('sample_size', { ascending: false })
-    .limit(100);
-
-  if (!data) return [];
-  return [...new Set(data.map(d => d.product_name))];
-}
-
-interface ProductAnalysis {
-  baseModel: string;       // e.g. "Mac Studio M2 Max 2023"
-  storage: string | null;  // e.g. "512GB"
-  condition: 'new' | 'like_new' | 'good' | 'fair' | 'poor' | 'parts' | 'unknown';
-  conditionNotes: string | null;  // e.g. "minor scratch on lid, battery 87%"
-  year: number | null;     // e.g. 2023
-  processor: string | null; // e.g. "M2 Max", "A16 Bionic"
-  isAccessory: boolean;
-  isDamaged: boolean;
-  isRental: boolean;
-  isWanted: boolean;
-  isIrrelevant: boolean;   // cars, furniture, clothes, etc.
-  skipReason: string | null;
-  matchedCategory: string | null; // which watched category this belongs to, if any
-}
-
-/**
- * Use AI to do a deep analysis of a listing using ALL available context.
- * One call: relevance check + normalization + condition + specs.
- */
-async function analyzeProduct(
-  title: string,
-  description: string | null,
-  categoryNames: string[],
-  knownProducts: string[]
-): Promise<ProductAnalysis | null> {
-  const descContext = description
-    ? `\nDescription: "${description.slice(0, 800)}"`
-    : '';
-
-  const knownContext = knownProducts.length > 0
-    ? `\n\nKNOWN PRODUCTS IN OUR DATABASE (match to these when possible):\n${knownProducts.slice(0, 50).join(', ')}`
-    : '';
-
-  const prompt = `You are analyzing a marketplace listing to decide if it's worth buying to flip for profit.
-
-STEP 1 — WHAT IS ACTUALLY BEING SOLD?
-Read the title and description carefully. Answer: what specific item(s) is the seller offering?
-- "Bambu P1S & X1C complete assembly and nozzles" → selling nozzles and hotend assemblies (parts), NOT printers
-- "iPhone 15 Pro 256GB" → selling an iPhone 15 Pro
-- "MacBook Pro with charger and case" → selling a MacBook Pro (charger/case are bundled extras)
-- "Canon EF 70-200mm lens hood" → selling a lens hood (accessory), NOT a lens
-- "iPad Pro Magic Keyboard" → selling a keyboard (accessory), NOT an iPad
-- The description often clarifies what's actually for sale — READ IT
-
-STEP 2 — Does it match any of these WATCHED CATEGORIES?
-${categoryNames.map(c => `- ${c}`).join('\n')}
-If the item being sold doesn't fit any category, it's irrelevant (cars, furniture, drones, clothes, etc.)
-
-STEP 3 — Only if it's a relevant MAIN PRODUCT (not an accessory/part), extract details:
-- baseModel: Brand + model + tier + generation. NO storage. "MacBook Pro 14 M3 2023", "iPhone 15 Pro Max", "Bambu Lab X1C"
-  - Use description to fill in gaps: title "MacBook Pro" + description "2019 i7" = "MacBook Pro 15 2019 i7"
-- storage: "128GB", "512GB", etc. null if not mentioned
-- condition: new/like_new/good/fair/poor/parts/unknown — use ALL signals from title AND description
-- conditionNotes: specific details like "battery 82%", "scratch on back". null if none
-- year: production year. null if unknown
-- processor: "M1", "M3 Max", "A17 Pro", "i7-10700". null if not mentioned
-
-CLASSIFICATION:
-- isAccessory: TRUE if selling parts, accessories, add-ons, consumables — NOT a complete main product
-- isDamaged: TRUE if "for parts", "broken", "doesn't work", "water damage"
-- isRental: TRUE if "for rent", "rental", "per day"
-- isWanted: TRUE if "ISO", "WTB", "looking for", "wanted"
-- isIrrelevant: TRUE if doesn't match any watched category
-- skipReason: why it was flagged, null if none
-- matchedCategory: which watched category, null if irrelevant
-
-Title: "${title}"${descContext}${knownContext}
-
-IMPORTANT:
-- If the description mentions cracked, broken, shattered, damaged, dents, water damage, or "for parts" — isDamaged MUST be true
-- If the title is vague (e.g. "Just listed", single word, no product name) and there's no description — set baseModel to "unknown"
-- If you can match to a known product from our database, use that exact name as baseModel
-- condition should reflect the WORST signal from title OR description. "Great condition" in title but "cracked glass" in description = "poor"
-
-Return JSON only: {"whatIsBeingSold":"<1-line plain English>","baseModel":"...","storage":null,"condition":"unknown","conditionNotes":null,"year":null,"processor":null,"isAccessory":false,"isDamaged":false,"isRental":false,"isWanted":false,"isIrrelevant":false,"skipReason":null,"matchedCategory":null}`;
-
-  try {
-    const result = await parseWithAI(prompt);
-    const cleaned = result.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
-    const parsed = JSON.parse(cleaned);
-    if (parsed.whatIsBeingSold) {
-      console.log(`    AI sees: "${parsed.whatIsBeingSold}"`);
-    }
-    if (!parsed.baseModel || parsed.baseModel === 'unknown') return null;
-    return {
-      baseModel: parsed.baseModel,
-      storage: parsed.storage || null,
-      condition: parsed.condition || 'unknown',
-      conditionNotes: parsed.conditionNotes || null,
-      year: parsed.year || null,
-      processor: parsed.processor || null,
-      isAccessory: parsed.isAccessory ?? false,
-      isDamaged: parsed.isDamaged ?? false,
-      isRental: parsed.isRental ?? false,
-      isWanted: parsed.isWanted ?? false,
-      isIrrelevant: parsed.isIrrelevant ?? false,
-      skipReason: parsed.skipReason || null,
-      matchedCategory: parsed.matchedCategory || null,
-    };
   } catch {
     return null;
   }
@@ -169,297 +46,263 @@ Return JSON only: {"whatIsBeingSold":"<1-line plain English>","baseModel":"...",
 
 /**
  * Condition multiplier — how much the condition affects resale value.
- * A "fair" iPhone is worth less than a "like new" one.
  */
 function conditionMultiplier(condition: string): number {
   switch (condition) {
-    case 'new': return 1.05;      // Can sometimes sell above market
-    case 'like_new': return 1.0;  // Full market value
-    case 'good': return 0.90;     // Slight discount
-    case 'fair': return 0.75;     // Noticeable discount
-    case 'poor': return 0.55;     // Heavy discount
-    case 'parts': return 0.25;    // Parts value only
-    default: return 0.85;         // Unknown = assume good-ish
+    case 'new': return 1.05;
+    case 'like_new': return 1.0;
+    case 'good': return 0.90;
+    case 'fair': return 0.75;
+    case 'poor': return 0.55;
+    case 'parts': return 0.25;
+    default: return 0.85;
   }
 }
 
 /**
- * Get user-provided product intelligence (notes, difficulty, price bounds, etc.)
+ * Storage bonus — extra value for storage above the base config.
+ * Products are tracked as base variants, so extra storage = extra profit potential.
  */
-async function getProductIntel(productName: string): Promise<{
-  notes: string | null;
-  difficulty: 'easy' | 'moderate' | 'hard' | null;
-  price_floor: number | null;
-  price_ceiling: number | null;
-  storage_matters: boolean;
-  battery_matters: boolean;
-  tags: string[];
-} | null> {
-  const { data } = await supabase
-    .from('stc_product_intel')
-    .select('notes, difficulty, price_floor, price_ceiling, storage_matters, battery_matters, tags')
-    .eq('product_name', productName)
-    .limit(1);
+function storageBonus(storage: string | null): number {
+  if (!storage) return 0;
+  const gb = parseInt(storage.replace(/[^\d]/g, ''), 10);
+  if (isNaN(gb)) return 0;
+  // Base configs are typically 64-256GB depending on product.
+  // Anything 512GB+ adds meaningful value.
+  if (gb >= 2000) return 0.20; // 2TB+
+  if (gb >= 1000) return 0.15; // 1TB
+  if (gb >= 512) return 0.10;  // 512GB
+  if (gb >= 256) return 0.05;  // 256GB (slight bump for non-base)
+  return 0;
+}
 
-  if (data && data.length > 0) return data[0];
-  return null;
+interface ProductAnalysis {
+  reasoning: string;
+  canonicalName: string;
+  brand: string | null;
+  modelLine: string | null;
+  year: number | null;
+  storage: string | null;
+  condition: 'new' | 'like_new' | 'good' | 'fair' | 'poor' | 'parts' | 'unknown';
+  conditionNotes: string | null;
+  isAccessory: boolean;
+  isDamaged: boolean;
+  isRental: boolean;
+  isWanted: boolean;
+  isIrrelevant: boolean;
+  isTooOld: boolean;
+  skipReason: string | null;
 }
 
 /**
- * Ask AI to estimate the used local market value for a product.
- * Now includes condition context for better estimates.
+ * Smart AI product analysis. Reasons through what's being sold,
+ * resolves ambiguity, and normalizes to a base product variant.
  */
-async function estimateValueWithAI(
-  productName: string,
-  condition: string,
-  conditionNotes: string | null
-): Promise<number | null> {
-  const conditionContext = conditionNotes
-    ? `\nCondition: ${condition} — ${conditionNotes}`
-    : `\nCondition: ${condition}`;
+async function analyzeProduct(
+  title: string,
+  description: string | null,
+  knownProducts: string[]
+): Promise<ProductAnalysis | null> {
+  const descContext = description
+    ? `\nSeller's Description: "${description.slice(0, 800)}"`
+    : '';
 
-  const prompt = `What is a fair used price for "${productName}" on Facebook Marketplace or local classifieds in the US?
-${conditionContext}
+  const knownContext = knownProducts.length > 0
+    ? `\n\nPRODUCTS ALREADY IN OUR DATABASE (use these exact names when the listing matches):\n${knownProducts.join('\n')}`
+    : '';
 
-Consider:
-- Local pickup, cash transaction
-- Current market (not retail, not eBay shipped prices — local used is typically 50-70% of retail)
-- Factor in the condition: ${condition === 'new' ? 'sealed/new should be near retail' : condition === 'fair' ? 'fair condition = lower price' : 'used/good condition'}
+  const currentYear = new Date().getFullYear();
+  const prompt = `You are a product identification expert analyzing marketplace listings for a resale business. Your job is to identify the SPECIFIC product being sold — not a generic category.
 
-Return ONLY a single number (the dollar amount, no $ sign). If you can't estimate, return 0.`;
+STEP 1 — READ EVERYTHING
+The title is often vague or wrong. The DESCRIPTION is where the real details are. Read both carefully.
+- "Mac Mini" in the title but "Late 2014 Mac mini, Intel i5, 8GB RAM" in description → this is a "Mac Mini Late 2014 i5", NOT just "Mac Mini"
+- "iPad Pro" in the title but "M4 chip, 2025" in description → this is an "iPad Pro M4 11-inch" or "iPad Pro M4 13-inch"
+- Multiple items in one listing? Pick the PRIMARY item being sold, or set isIrrelevant if it's a bundle that can't be normalized to one product.
+
+STEP 2 — IDENTIFY THE SPECIFIC PRODUCT
+You MUST determine the generation, year, or chip. A product without a generation is USELESS for pricing.
+
+GOOD canonical names (specific, priceable):
+- "Mac Mini M2 2023"
+- "Mac Mini Late 2014 i5"
+- "MacBook Pro 14-inch M3 Pro"
+- "iPhone 15 Pro Max"
+- "iPad Pro M4 11-inch"
+- "Bambu Lab X1C"
+- "iMac M1 24-inch 2021"
+
+BAD canonical names (too generic, NEVER use these):
+- "Apple Mac Mini" ← WHICH Mac Mini? There are 10+ generations
+- "MacBook Pro" ← WHICH ONE?
+- "iPhone" ← useless
+- "iPad Pro" ← need the chip/year/size
+
+How to determine generation:
+- Check description for: year, chip (M1/M2/M3/M4, Intel i5/i7/i9, A-series), model number
+- Check title for year mentions, chip names
+- "Late 2014", "2018", "M2", "i7-10700" — these all identify the generation
+- If NEITHER title NOR description gives ANY generation info, set canonicalName to "unknown"
+
+STEP 3 — AGE CHECK
+Current year: ${currentYear}. If the product is from ${currentYear - 5} or older (5+ years), set isTooOld to true.
+Examples: A 2018 MacBook in ${currentYear} = ${currentYear - 2018} years old = too old. A 2022 iPad = ${currentYear - 2022} years old = fine.
+Intel Macs without a year: if it has Intel i5/i7 and no year mentioned, it's almost certainly 5+ years old → isTooOld: true.
+
+STEP 4 — EXTRACT DETAILS
+Format: Brand + Product Line + Tier/Size + Generation/Chip + Year (if known and not redundant with chip)
+- storage: "128GB", "256GB", "512GB", "1TB" etc. NEVER in canonicalName
+- year: the production year as a number (e.g. 2024). null if truly unknown
+- condition: new/like_new/good/fair/poor/parts/unknown — use the WORST signal from title AND description
+- conditionNotes: specific details like "battery 82%", "scratch on back". null if none
+
+CLASSIFICATION FLAGS:
+- isAccessory: TRUE if selling parts, accessories, cases, cables, adapters — NOT a complete main product
+- isDamaged: TRUE if broken, cracked, water damage, "for parts", doesn't work
+- isRental: TRUE if "for rent", "rental", "per day"
+- isWanted: TRUE if "ISO", "WTB", "looking for", "wanted"
+- isIrrelevant: TRUE if not electronics/tech (cars, furniture, clothes, toys, etc.)
+- isTooOld: TRUE if the product is 5+ years old based on year/generation
+- skipReason: why it was flagged, null if clean listing
+
+Title: "${title}"${descContext}${knownContext}
+
+Return JSON only:
+{"reasoning":"<2-3 sentences>","canonicalName":"...","brand":"...","modelLine":"...","year":null,"storage":null,"condition":"unknown","conditionNotes":null,"isAccessory":false,"isDamaged":false,"isRental":false,"isWanted":false,"isIrrelevant":false,"isTooOld":false,"skipReason":null}
+
+CRITICAL RULES:
+- NEVER return a generic name like "Apple Mac Mini" or "MacBook Pro" — you MUST include the generation/chip/year
+- If you can't determine the generation from title+description, set canonicalName to "unknown"
+- NEVER include storage in canonicalName
+- Description OVERRIDES title when they conflict
+- "Great condition" in title but "cracked screen" in description = isDamaged:true, condition:"poor"
+- Multiple items at different prices = set isIrrelevant:true, skipReason:"multiple items in one listing"`;
 
   try {
     const result = await parseWithAI(prompt);
-    const price = parseFloat(result.trim().replace(/[$,]/g, ''));
-    if (isNaN(price) || price <= 0) return null;
-    return Math.round(price);
+    const cleaned = result.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
+    const parsed = JSON.parse(cleaned);
+
+    if (parsed.reasoning) {
+      console.log(`    AI reasoning: "${parsed.reasoning}"`);
+    }
+
+    if (!parsed.canonicalName || parsed.canonicalName === 'unknown') return null;
+
+    return {
+      reasoning: parsed.reasoning || '',
+      canonicalName: parsed.canonicalName,
+      brand: parsed.brand || null,
+      modelLine: parsed.modelLine || null,
+      year: parsed.year || null,
+      storage: parsed.storage || null,
+      condition: parsed.condition || 'unknown',
+      conditionNotes: parsed.conditionNotes || null,
+      isAccessory: parsed.isAccessory ?? false,
+      isDamaged: parsed.isDamaged ?? false,
+      isRental: parsed.isRental ?? false,
+      isWanted: parsed.isWanted ?? false,
+      isIrrelevant: parsed.isIrrelevant ?? false,
+      isTooOld: parsed.isTooOld ?? false,
+      skipReason: parsed.skipReason || null,
+    };
   } catch {
     return null;
   }
 }
 
 /**
- * Check if the user has set a manual market value for this product.
+ * Find an existing product by canonical name, or create a new one in 'pending' status.
  */
-async function getManualPrice(
-  productName: string,
-  category: string | null
-): Promise<number | null> {
-  let query = supabase
-    .from('stc_market_prices')
-    .select('avg_sold_price')
-    .eq('manual_override', true)
-    .not('avg_sold_price', 'is', null);
-
-  if (category) {
-    query = query.eq('category', category);
-  }
-
-  const { data: exact } = await query.eq('product_name', productName).limit(1);
-  if (exact && exact.length > 0) return exact[0].avg_sold_price;
-
-  return null;
-}
-
-/**
- * Combine price signals into a weighted market value.
- */
-function computeMarketValue(
-  manualPrice: number | null,
-  observed: { median: number; count: number } | null,
-  aiEstimate: number | null = null
-): number | null {
-  const hasManual = manualPrice !== null;
-  const hasObserved = observed !== null && observed.count >= 2;
-  const hasAI = aiEstimate !== null;
-
-  if (hasManual && hasObserved) {
-    return Math.round((manualPrice! * 0.6 + observed!.median * 0.4) * 100) / 100;
-  }
-  if (hasManual) return manualPrice;
-  if (hasObserved && hasAI) {
-    return Math.round((observed!.median * 0.7 + aiEstimate! * 0.3) * 100) / 100;
-  }
-  if (hasObserved) return observed!.median;
-  if (hasAI) return aiEstimate;
-  return null;
-}
-
-/**
- * Look at previous listings for the SAME normalized product
- * and compute the median asking price as our market reference.
- */
-async function getMarketPrice(
-  productName: string,
-  category: string | null
-): Promise<{ median: number; count: number } | null> {
-  const { data: productPrices } = await supabase
-    .from('stc_market_prices')
-    .select('avg_sold_price, sample_size')
-    .eq('product_name', productName)
-    .eq('source', 'observed')
-    .not('avg_sold_price', 'is', null)
-    .limit(1);
-
-  if (productPrices && productPrices.length > 0 && productPrices[0].sample_size >= 2) {
-    return { median: productPrices[0].avg_sold_price, count: productPrices[0].sample_size };
-  }
-
-  const { data: exactListings } = await supabase
-    .from('stc_listings')
-    .select('asking_price')
-    .eq('parsed_product', productName)
-    .not('asking_price', 'is', null)
-    .gt('asking_price', 0);
-
-  if (exactListings && exactListings.length >= 2) {
-    const prices = exactListings.map((d) => d.asking_price as number).sort((a, b) => a - b);
-    const mid = Math.floor(prices.length / 2);
-    const median = prices.length % 2 === 0 ? (prices[mid - 1] + prices[mid]) / 2 : prices[mid];
-    return { median, count: prices.length };
-  }
-
-  if (category) {
-    const { data: categoryListings } = await supabase
-      .from('stc_listings')
-      .select('parsed_product, asking_price')
-      .eq('parsed_category', category)
-      .not('asking_price', 'is', null)
-      .not('parsed_product', 'is', null)
-      .gt('asking_price', 0);
-
-    if (categoryListings && categoryListings.length >= 3) {
-      const uniqueProducts = [...new Set(categoryListings.map(l => l.parsed_product))];
-      if (uniqueProducts.length > 1) {
-        try {
-          const similarProducts = await findSimilarProducts(productName, uniqueProducts as string[]);
-          if (similarProducts.length > 0) {
-            const prices = categoryListings
-              .filter(l => similarProducts.includes(l.parsed_product as string))
-              .map(l => l.asking_price as number)
-              .sort((a, b) => a - b);
-
-            if (prices.length >= 2) {
-              const mid = Math.floor(prices.length / 2);
-              const median = prices.length % 2 === 0 ? (prices[mid - 1] + prices[mid]) / 2 : prices[mid];
-              return { median, count: prices.length };
-            }
-          }
-        } catch {
-          // AI comparison failed, skip
-        }
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
- * Ask AI which products from our database are comparable to the target product.
- */
-async function findSimilarProducts(target: string, candidates: string[]): Promise<string[]> {
-  const preFiltered = candidates.filter(c => {
-    const targetLower = target.toLowerCase();
-    const candidateLower = c.toLowerCase();
-    if (targetLower === candidateLower) return true;
-    const targetHasProMax = targetLower.includes('pro max');
-    const candidateHasProMax = candidateLower.includes('pro max');
-    if (targetHasProMax !== candidateHasProMax) return false;
-    const targetHasMini = targetLower.includes('mini');
-    const candidateHasMini = candidateLower.includes('mini');
-    if (targetHasMini !== candidateHasMini) return false;
-    const targetHasPlus = targetLower.includes('plus');
-    const candidateHasPlus = candidateLower.includes('plus');
-    if (targetHasPlus !== candidateHasPlus) return false;
-    if (!targetHasProMax && !candidateHasProMax) {
-      const targetHasPro = targetLower.includes(' pro');
-      const candidateHasPro = candidateLower.includes(' pro');
-      if (targetHasPro !== candidateHasPro) return false;
-    }
-    const targetHasAir = targetLower.includes('air');
-    const candidateHasAir = candidateLower.includes('air');
-    if (targetHasAir !== candidateHasAir) return false;
-    return true;
-  });
-
-  if (preFiltered.length === 0) return [];
-  if (preFiltered.length === 1 && preFiltered[0].toLowerCase() === target.toLowerCase()) return preFiltered;
-
-  const prompt = `Given a target product, identify which candidates are the EXACT SAME product model. Only storage size differences are acceptable.
-
-CRITICAL RULES — these are DIFFERENT products, NEVER group them:
-- "iPhone 13 Pro" ≠ "iPhone 13 Pro Max" (Pro Max is a bigger, more expensive phone)
-- "iPhone 13 Pro" ≠ "iPhone 13" (base model vs Pro)
-- "iPhone 13" ≠ "iPhone 13 Mini" (different size)
-- "iPhone 15 Pro" ≠ "iPhone 16 Pro" (different generation)
-- "MacBook Pro" ≠ "MacBook Air" (different product line)
-- "iPad Pro 12.9" ≠ "iPad Pro 11" (different screen size)
-
-SAME product (OK to group):
-- "iPhone 13 Pro 128GB" ≈ "iPhone 13 Pro 256GB" (only storage differs)
-- "MacBook Air 13 2020" ≈ "MacBook Air 13 2020 M1" (same model, spec clarification)
-
-Target: "${target}"
-Candidates: ${JSON.stringify(preFiltered)}
-
-Return ONLY a JSON array of matching candidate strings. Empty array [] if none match.`;
-
-  try {
-    const result = await parseWithAI(prompt);
-    const cleaned = result.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
-    return JSON.parse(cleaned);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Update market_prices table with observed data from our listings.
- */
-async function updateMarketPrices(
-  productName: string,
-  category: string,
-  askingPrice: number
-): Promise<void> {
+async function findOrCreateProduct(
+  canonicalName: string,
+  brand: string | null,
+  modelLine: string | null,
+  autoApprove: boolean = false
+): Promise<Product> {
+  // Try exact match (case-insensitive)
   const { data: existing } = await supabase
-    .from('stc_market_prices')
-    .select('id, avg_sold_price, low_sold_price, high_sold_price, sample_size')
-    .eq('category', category)
-    .eq('product_name', productName)
-    .eq('source', 'observed')
+    .from('stc_products')
+    .select('*')
+    .ilike('canonical_name', canonicalName)
     .limit(1);
 
   if (existing && existing.length > 0) {
-    const row = existing[0];
-    const n = row.sample_size + 1;
-    const newAvg =
-      ((row.avg_sold_price ?? 0) * row.sample_size + askingPrice) / n;
-
+    // Increment listing count
     await supabase
-      .from('stc_market_prices')
-      .update({
-        avg_sold_price: Math.round(newAvg * 100) / 100,
-        low_sold_price: Math.min(row.low_sold_price ?? askingPrice, askingPrice),
-        high_sold_price: Math.max(row.high_sold_price ?? askingPrice, askingPrice),
-        sample_size: n,
-        scraped_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', row.id);
-  } else {
-    await supabase.from('stc_market_prices').insert({
-      category,
-      product_name: productName,
-      condition: 'mixed',
-      avg_sold_price: askingPrice,
-      low_sold_price: askingPrice,
-      high_sold_price: askingPrice,
-      source: 'observed',
-      sample_size: 1,
-      scraped_at: new Date().toISOString(),
-    });
+      .from('stc_products')
+      .update({ listing_count: (existing[0].listing_count || 0) + 1, updated_at: new Date().toISOString() })
+      .eq('id', existing[0].id);
+
+    return existing[0] as Product;
   }
+
+  // Create new product — auto-approve if brand rule says so
+  const initialStatus = autoApprove ? 'active' : 'pending';
+  const { data: created, error } = await supabase
+    .from('stc_products')
+    .insert({
+      canonical_name: canonicalName,
+      brand,
+      model_line: modelLine,
+      status: initialStatus,
+      first_seen_at: new Date().toISOString(),
+      listing_count: 1,
+      confidence: 'low',
+    })
+    .select('*')
+    .single();
+
+  if (error) {
+    // Race condition: another scorer run created it
+    const { data: retry } = await supabase
+      .from('stc_products')
+      .select('*')
+      .ilike('canonical_name', canonicalName)
+      .limit(1);
+
+    if (retry && retry.length > 0) return retry[0] as Product;
+    throw error;
+  }
+
+  console.log(`  [new product] "${canonicalName}" — ${initialStatus}${autoApprove ? ' (auto-approved)' : ''}`);
+  return created as Product;
+}
+
+/**
+ * Load all known product canonical names for AI context.
+ */
+async function getKnownProductNames(): Promise<string[]> {
+  const { data } = await supabase
+    .from('stc_products')
+    .select('canonical_name')
+    .order('listing_count', { ascending: false })
+    .limit(200);
+
+  if (!data) return [];
+  return data.map(d => d.canonical_name);
+}
+
+/**
+ * Load brand rules for age filtering and auto-approve.
+ */
+interface BrandRule {
+  brand: string;
+  max_age_years: number | null;
+  auto_approve: boolean;
+}
+
+async function getBrandRules(): Promise<Record<string, BrandRule>> {
+  const { data } = await supabase
+    .from('stc_brand_rules')
+    .select('brand, max_age_years, auto_approve');
+
+  if (!data) return {};
+  const rules: Record<string, BrandRule> = {};
+  for (const r of data) {
+    rules[r.brand.toLowerCase()] = r;
+  }
+  return rules;
 }
 
 async function scoreUnscored(): Promise<void> {
@@ -484,20 +327,25 @@ async function scoreUnscored(): Promise<void> {
 
   console.log(`Found ${listings.length} unscored listings`);
 
-  // Load watched categories and known products
-  const categories = await getCategories(supabase);
-  const categoryNames = categories.map(c => `${c.name} (keywords: ${c.keywords.join(', ')})`);
-  const knownProducts = await getKnownProducts();
-  console.log(`Loaded ${knownProducts.length} known products for matching`);
+  const knownProducts = await getKnownProductNames();
+  const brandRules = await getBrandRules();
+  console.log(`Loaded ${knownProducts.length} known products, ${Object.keys(brandRules).length} brand rules`);
 
   for (const listing of listings as Listing[]) {
     try {
-      // Skip obviously garbage titles
+      // Skip garbage titles
       const titleLower = listing.title.toLowerCase().trim();
       if (titleLower === 'just listed' || titleLower.length < 4) {
         await supabase
           .from('stc_listings')
-          .update({ score: 'pass', estimated_profit: 0, status: 'dismissed', feedback: 'irrelevant', feedback_note: 'no product info in title', updated_at: new Date().toISOString() })
+          .update({
+            score: 'pass',
+            estimated_profit: 0,
+            status: 'dismissed',
+            feedback: 'irrelevant',
+            feedback_note: 'no product info in title',
+            updated_at: new Date().toISOString(),
+          })
           .eq('id', listing.id);
         console.log(`  [dismissed] garbage title: "${listing.title}"`);
         continue;
@@ -506,7 +354,7 @@ async function scoreUnscored(): Promise<void> {
       // Fetch description if we don't have one
       let description = listing.raw_email_snippet;
       if (!description && listing.listing_url) {
-        description = await fetchDescription(listing.listing_url, listing.source);
+        description = await fetchDescription(listing.listing_url);
         if (description) {
           await supabase
             .from('stc_listings')
@@ -516,8 +364,8 @@ async function scoreUnscored(): Promise<void> {
         }
       }
 
-      // Deep analysis: relevance + normalization + condition + specs
-      const analysis = await analyzeProduct(listing.title, description, categoryNames, knownProducts);
+      // AI analysis: reason through what's being sold, normalize product
+      const analysis = await analyzeProduct(listing.title, description, knownProducts);
 
       if (!analysis) {
         await supabase
@@ -528,23 +376,17 @@ async function scoreUnscored(): Promise<void> {
         continue;
       }
 
-      // Determine category: AI-matched > keyword match > null
-      const category = analysis.matchedCategory
-        ? categories.find(c => c.name.toLowerCase() === analysis.matchedCategory!.toLowerCase())?.slug ?? findCategorySync(listing.title, categories)
-        : listing.parsed_category ?? findCategorySync(listing.title, categories);
-
-      // Update parsed fields with full analysis
+      // Update parsed fields from AI analysis
       await supabase
         .from('stc_listings')
         .update({
-          parsed_product: analysis.baseModel,
+          parsed_product: analysis.canonicalName,
           parsed_storage: analysis.storage,
-          parsed_category: category,
           parsed_condition: analysis.condition !== 'unknown' ? analysis.condition : null,
         })
         .eq('id', listing.id);
 
-      // Gate 1: Irrelevant listings — auto-dismiss
+      // Gate 1: Irrelevant listings
       if (analysis.isIrrelevant) {
         await supabase
           .from('stc_listings')
@@ -561,32 +403,86 @@ async function scoreUnscored(): Promise<void> {
         continue;
       }
 
-      // Gate 2: Accessories, damaged, rentals, wanted posts — auto-pass
-      if (analysis.isAccessory || analysis.isDamaged || analysis.isRental || analysis.isWanted) {
+      // Gate 2: Too old — check brand rules for max_age_years
+      const currentYear = new Date().getFullYear();
+      const brandKey = (analysis.brand ?? '').toLowerCase();
+      const rule = brandRules[brandKey];
+      const maxAge = rule?.max_age_years;
+
+      let isTooOld = false;
+      if (maxAge !== null && maxAge !== undefined) {
+        // Brand has an age limit — check deterministically
+        isTooOld = analysis.isTooOld
+          || (analysis.year !== null && analysis.year <= currentYear - maxAge)
+          || (!analysis.year && /\b(intel\s+i[357]|intel\s+core\s+i[357]|i[357]-[0-9]{4})\b/i.test(analysis.canonicalName + ' ' + (listing.title ?? '')))
+          || (!analysis.year && new RegExp(`\\b(${Array.from({ length: maxAge + 5 }, (_, i) => currentYear - maxAge - i).join('|')})\\b`).test(analysis.canonicalName));
+      }
+
+      if (isTooOld) {
         await supabase
           .from('stc_listings')
-          .update({ score: 'pass', estimated_profit: 0, updated_at: new Date().toISOString() })
+          .update({
+            score: 'pass',
+            estimated_profit: 0,
+            feedback: 'irrelevant',
+            feedback_note: `too old${analysis.year ? ` (${analysis.year})` : ''}`,
+            status: 'dismissed',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', listing.id);
+        console.log(`  [dismissed] too old${analysis.year ? ` (${analysis.year})` : ''}: ${listing.title}`);
+        continue;
+      }
+
+      // Gate 3: Accessories, damaged, rentals, wanted, parts-condition
+      if (analysis.isAccessory || analysis.isDamaged || analysis.isRental || analysis.isWanted || analysis.condition === 'parts') {
+        await supabase
+          .from('stc_listings')
+          .update({
+            score: 'pass',
+            estimated_profit: 0,
+            feedback_note: analysis.skipReason ?? (analysis.isAccessory ? 'accessory' : analysis.isDamaged ? 'damaged' : analysis.isRental ? 'rental' : analysis.isWanted ? 'wanted post' : 'parts condition'),
+            updated_at: new Date().toISOString(),
+          })
           .eq('id', listing.id);
         console.log(`  [skip] ${analysis.skipReason ?? 'flagged'}: ${listing.title}`);
         continue;
       }
 
-      // Gate 3: "Parts" condition — auto-pass (even if not flagged as isDamaged)
-      if (analysis.condition === 'parts') {
+      // Find or create the product
+      const autoApprove = rule?.auto_approve ?? false;
+      const product = await findOrCreateProduct(analysis.canonicalName, analysis.brand, analysis.modelLine, autoApprove);
+
+      // Link listing to product
+      await supabase
+        .from('stc_listings')
+        .update({ product_id: product.id })
+        .eq('id', listing.id);
+
+      // Gate 3: Inactive product — auto-dismiss
+      if (product.status === 'inactive') {
         await supabase
           .from('stc_listings')
-          .update({ score: 'pass', estimated_profit: 0, updated_at: new Date().toISOString() })
+          .update({
+            score: 'pass',
+            estimated_profit: 0,
+            status: 'dismissed',
+            feedback: 'irrelevant',
+            feedback_note: 'inactive product',
+            updated_at: new Date().toISOString(),
+          })
           .eq('id', listing.id);
-        console.log(`  [skip] for parts: ${listing.title}`);
+        console.log(`  [dismissed] inactive product "${product.canonical_name}": ${listing.title}`);
         continue;
       }
 
-      // Record this listing's price for future reference
-      if (listing.asking_price && category && analysis.baseModel) {
-        await updateMarketPrices(analysis.baseModel, category, listing.asking_price);
+      // Gate 4: Pending product — wait for approval
+      if (product.status === 'pending') {
+        console.log(`  [pending] awaiting approval for "${product.canonical_name}": ${listing.title}`);
+        continue; // Leave score null, listing waits
       }
 
-      // No asking price = can't score
+      // Active product — score it
       if (!listing.asking_price) {
         await supabase
           .from('stc_listings')
@@ -596,99 +492,106 @@ async function scoreUnscored(): Promise<void> {
         continue;
       }
 
-      // Get product intel (user context) if available
-      const intel = analysis.baseModel ? await getProductIntel(analysis.baseModel) : null;
+      // No target_buy_price yet — compute initial pricing inline
+      if (!product.target_buy_price) {
+        console.log(`  [pricing] computing initial target for "${product.canonical_name}"...`);
 
-      // Get market reference
-      const manualPrice = intel?.price_ceiling ?? await getManualPrice(analysis.baseModel ?? listing.title, category);
-      const market = await getMarketPrice(analysis.baseModel ?? listing.title, category);
-
-      // AI fallback estimate — now condition-aware
-      let aiEstimate: number | null = null;
-      if (!manualPrice && (!market || market.count < 2) && analysis.baseModel) {
-        aiEstimate = await estimateValueWithAI(analysis.baseModel, analysis.condition, analysis.conditionNotes);
-        if (aiEstimate) {
-          console.log(`    AI estimate for ${analysis.baseModel} (${analysis.condition}): $${aiEstimate}`);
-        }
-      }
-
-      // Compute base market value from available signals
-      const baseMarketValue = computeMarketValue(manualPrice, market, aiEstimate);
-
-      // Apply condition adjustment — a "fair" item is worth less than "like new"
-      // Only apply when we have market data (AI estimates already factor condition)
-      const condMult = (manualPrice || (market && market.count >= 2))
-        ? conditionMultiplier(analysis.condition)
-        : 1.0; // AI estimate already accounts for condition
-
-      const marketValue = baseMarketValue ? Math.round(baseMarketValue * condMult) : null;
-
-      // Apply price floor check
-      if (intel?.price_floor && listing.asking_price > intel.price_floor) {
-        await supabase
+        // Pull all listings for this product
+        const { data: allPriced } = await supabase
           .from('stc_listings')
-          .update({ score: 'pass', estimated_profit: 0, updated_at: new Date().toISOString() })
-          .eq('id', listing.id);
-        console.log(`  [pass] Above price floor $${intel.price_floor}: ${listing.title} — $${listing.asking_price}`);
-        continue;
+          .select('asking_price')
+          .eq('product_id', product.id)
+          .not('asking_price', 'is', null)
+          .gt('asking_price', 0);
+
+        const prices = (allPriced ?? []).map(l => l.asking_price as number);
+
+        if (prices.length === 0) {
+          console.log(`  [waiting] no priced listings for "${product.canonical_name}": ${listing.title}`);
+          continue;
+        }
+
+        const sorted = [...prices].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+        const low = sorted[0];
+        const high = sorted[sorted.length - 1];
+
+        // Ask AI for a real market value and buy-below price
+        let quickTarget: number;
+        let aiValue: number | null = null;
+        try {
+          const aiPrompt = `You are a local marketplace flipping expert. What should I pay MAX to flip "${product.canonical_name}" profitably?
+
+Observed local listings: ${prices.length} seen, range $${low}-$${high}, median asking $${median}.
+This is Facebook Marketplace / KSL Classifieds in Utah — local cash pickup.
+
+Consider:
+- Sellers often list high, actual sale is 10-20% below asking
+- I need at least 20% margin after fees to make it worth my time
+- Factor in typical demand and how fast these sell locally
+
+Return JSON only: {"marketValue":<fair_market_number>,"buyBelow":<max_I_should_pay>}`;
+
+          const result = await parseWithAI(aiPrompt);
+          const cleaned = result.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
+          const parsed = JSON.parse(cleaned);
+          if (parsed.buyBelow > 0) {
+            quickTarget = Math.round(parsed.buyBelow);
+            aiValue = parsed.marketValue > 0 ? Math.round(parsed.marketValue) : null;
+            console.log(`    AI pricing: market $${aiValue}, buy below $${quickTarget}`);
+          } else {
+            quickTarget = Math.round(median * 0.60);
+          }
+        } catch {
+          // AI failed, fall back to 60% of median
+          quickTarget = Math.round(median * 0.60);
+          console.log(`    AI pricing failed, fallback: $${quickTarget}`);
+        }
+
+        await supabase.from('stc_products').update({
+          target_buy_price: quickTarget,
+          ai_market_value: aiValue,
+          median_asking_price: median,
+          low_price: low,
+          high_price: high,
+          listing_count: prices.length,
+          updated_at: new Date().toISOString(),
+        }).eq('id', product.id);
+        product.target_buy_price = quickTarget;
+        console.log(`    Initial target: $${quickTarget} (${prices.length} listings, median $${median})`);
       }
+
+      // Compute adjusted market value
+      const condMult = conditionMultiplier(analysis.condition);
+      const storageMult = 1 + storageBonus(analysis.storage);
+      const adjustedValue = product.target_buy_price * condMult * storageMult;
+
+      // Compute profit and score
+      const estimatedProfit = Math.round((adjustedValue - listing.asking_price) * 100) / 100;
+      const discount = ((adjustedValue - listing.asking_price) / adjustedValue) * 100;
 
       let score: ListingScore;
-      let estimatedProfit: number;
-
-      // Determine pricing confidence
-      const hasHardData = !!manualPrice || (market && market.count >= 2);
-      const aiOnly = !hasHardData && !!aiEstimate;
-
-      if (marketValue) {
-        const discount = ((marketValue - listing.asking_price) / marketValue) * 100;
-        const sellFactor = intel?.difficulty === 'hard' ? 0.85 : intel?.difficulty === 'moderate' ? 0.90 : 0.95;
-        estimatedProfit = Math.round((marketValue * sellFactor - listing.asking_price) * 100) / 100;
-
-        if (aiOnly) {
-          // AI-only pricing: be skeptical. Never "great", higher bar for "good"
-          if (discount >= 35 && estimatedProfit >= 150) {
-            score = 'good'; // Cap at good — AI estimates can be way off
-          } else {
-            score = 'pass';
-          }
-        } else if (discount >= 30 && estimatedProfit >= 200) {
-          score = 'great';
-        } else if (discount >= 15 && estimatedProfit >= 50) {
-          score = 'good';
-        } else {
-          score = 'pass';
-        }
-
-        const sources = [];
-        if (intel?.price_ceiling) sources.push(`ceiling $${intel.price_ceiling}`);
-        if (manualPrice && !intel?.price_ceiling) sources.push(`manual $${manualPrice}`);
-        if (market && market.count >= 2) sources.push(`observed $${market.median} (${market.count})`);
-        if (aiEstimate) sources.push(`AI $${aiEstimate}`);
-        if (analysis.condition !== 'unknown') sources.push(`cond:${analysis.condition}`);
-        if (condMult !== 1.0) sources.push(`×${condMult}`);
-        if (intel?.difficulty) sources.push(intel.difficulty);
-        if (aiOnly) sources.push('AI-ONLY⚠️');
-        console.log(
-          `  [${score}] ${listing.title} — $${listing.asking_price} vs $${marketValue} (${sources.join(', ')}, ${discount.toFixed(0)}% off, profit $${estimatedProfit})`
-        );
+      if (discount >= 30 && estimatedProfit >= 200) {
+        score = 'great';
+      } else if (discount >= 15 && estimatedProfit >= 50) {
+        score = 'good';
       } else {
         score = 'pass';
-        estimatedProfit = 0;
-        console.log(
-          `  [pass] No market data (${market?.count ?? 0} observed): ${listing.title} — $${listing.asking_price}`
-        );
       }
 
       // Build price source description
       const priceSources = [];
-      if (intel?.price_ceiling) priceSources.push(`Your value: $${intel.price_ceiling}`);
-      if (manualPrice && !intel?.price_ceiling) priceSources.push(`Manual: $${manualPrice}`);
-      if (market && market.count >= 2) priceSources.push(`${market.count} observed, median $${market.median}`);
-      if (aiEstimate) priceSources.push(`AI estimate: $${aiEstimate}`);
+      priceSources.push(`Target: $${product.target_buy_price}`);
       if (analysis.condition !== 'unknown') priceSources.push(`Condition: ${analysis.condition}`);
       if (analysis.conditionNotes) priceSources.push(analysis.conditionNotes);
-      const priceSource = priceSources.length > 0 ? priceSources.join(' · ') : null;
+      if (analysis.storage) priceSources.push(`Storage: ${analysis.storage}`);
+      priceSources.push(`Confidence: ${product.confidence}`);
+      const priceSource = priceSources.join(' · ');
+
+      console.log(
+        `  [${score}] ${listing.title} — $${listing.asking_price} vs $${Math.round(adjustedValue)} (${priceSource}, ${discount.toFixed(0)}% off, profit $${estimatedProfit})`
+      );
 
       await supabase
         .from('stc_listings')
@@ -700,12 +603,13 @@ async function scoreUnscored(): Promise<void> {
         })
         .eq('id', listing.id);
 
-      // Alert only for great deals
-      if (score === 'great' && !listing.alert_sent) {
+      // Alert only for great deals with high confidence
+      const alertEligible = (product.confidence === 'high' || product.confidence === 'very_high');
+      if (score === 'great' && alertEligible && !listing.alert_sent) {
         const condLabel = analysis.condition !== 'unknown' ? ` [${analysis.condition}]` : '';
         await sendAlert(
           `${score.toUpperCase()}: $${estimatedProfit} potential profit`,
-          `${listing.title}${condLabel}\nAsking: $${listing.asking_price}${marketValue ? `\nMarket: $${marketValue}` : ''}${analysis.conditionNotes ? `\n${analysis.conditionNotes}` : ''}`,
+          `${listing.title}${condLabel}\nAsking: $${listing.asking_price}\nTarget: $${product.target_buy_price}${analysis.conditionNotes ? `\n${analysis.conditionNotes}` : ''}`,
           5,
           listing.listing_url ?? undefined
         );

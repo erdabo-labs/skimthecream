@@ -7,15 +7,11 @@ import { createServiceClient } from '../lib/supabase/service';
  * and checks if it's still available. If gone (404, redirected, removed),
  * marks it with gone_at and calculates days_active.
  *
- * This builds time-to-sell intelligence over time:
- * - Fast sellers (1-2 days) = high demand, price accordingly
- * - Slow sellers (7+ days) = room to negotiate
- * - Category avg_days_to_sell gets smarter with real data
+ * Updates product sell velocity and ease rating from real data.
  */
 
 const supabase = createServiceClient();
 
-// Rate limit: don't hammer the sites
 const DELAY_MS = 2000;
 const BATCH_SIZE = 50;
 
@@ -26,13 +22,9 @@ interface ListingToCheck {
   first_seen_at: string | null;
   created_at: string;
   parsed_product: string | null;
-  parsed_category: string | null;
+  product_id: number | null;
 }
 
-/**
- * Check if a Facebook Marketplace listing is still live.
- * Returns true if the listing appears to still be active.
- */
 async function checkFBListing(url: string): Promise<boolean> {
   try {
     const res = await fetch(url, {
@@ -48,7 +40,6 @@ async function checkFBListing(url: string): Promise<boolean> {
 
     const html = await res.text();
 
-    // Facebook shows specific signals when a listing is gone
     const goneSignals = [
       'This listing is no longer available',
       'This item is sold',
@@ -63,22 +54,15 @@ async function checkFBListing(url: string): Promise<boolean> {
       if (htmlLower.includes(signal.toLowerCase())) return false;
     }
 
-    // If we got a valid page with og:title, it's probably still up
     if (html.includes('og:title')) return true;
-
-    // If page is very short or just a redirect shell, probably gone
     if (html.length < 5000) return false;
 
     return true;
   } catch {
-    // Network error — don't mark as gone, could be temporary
-    return true;
+    return true; // Don't mark as gone on network error
   }
 }
 
-/**
- * Check if a KSL Classifieds listing is still live.
- */
 async function checkKSLListing(url: string): Promise<boolean> {
   try {
     const res = await fetch(url, {
@@ -90,7 +74,6 @@ async function checkKSLListing(url: string): Promise<boolean> {
       redirect: 'follow',
     });
 
-    // KSL returns 404 or redirects for removed listings
     if (res.status === 404) return false;
     if (!res.ok) return false;
 
@@ -111,7 +94,7 @@ async function checkKSLListing(url: string): Promise<boolean> {
 
     return true;
   } catch {
-    return true; // Don't mark as gone on network error
+    return true;
   }
 }
 
@@ -120,107 +103,65 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Update category avg_days_to_sell based on observed data.
+ * Update product sell velocity and ease rating from observed gone_at data.
  */
-async function updateCategoryStats(): Promise<void> {
-  // Get categories
-  const { data: categories } = await supabase
-    .from('stc_categories')
-    .select('id, slug, name');
-
-  if (!categories) return;
-
-  for (const cat of categories) {
-    // Calculate average days_active for gone listings in this category
-    const { data: goneLlistings } = await supabase
-      .from('stc_listings')
-      .select('days_active')
-      .eq('parsed_category', cat.slug)
-      .not('gone_at', 'is', null)
-      .not('days_active', 'is', null)
-      .gt('days_active', 0);
-
-    if (goneLlistings && goneLlistings.length >= 3) {
-      const days = goneLlistings.map(l => l.days_active as number).sort((a, b) => a - b);
-      const mid = Math.floor(days.length / 2);
-      const median = days.length % 2 === 0 ? (days[mid - 1] + days[mid]) / 2 : days[mid];
-
-      await supabase
-        .from('stc_categories')
-        .update({ avg_days_to_sell: Math.round(median) })
-        .eq('id', cat.id);
-
-      console.log(`  Category "${cat.name}": median ${Math.round(median)} days (${goneLlistings.length} samples)`);
-    }
-  }
-}
-
-/**
- * Update per-product market intelligence with time-to-sell data.
- */
-async function updateProductIntel(): Promise<void> {
-  // Find products with enough gone listings to compute stats
-  const { data: products } = await supabase
+async function updateProductStats(): Promise<void> {
+  const { data: goneData } = await supabase
     .from('stc_listings')
-    .select('parsed_product, days_active')
+    .select('product_id, days_active')
     .not('gone_at', 'is', null)
     .not('days_active', 'is', null)
-    .not('parsed_product', 'is', null)
+    .not('product_id', 'is', null)
     .gt('days_active', 0);
 
-  if (!products) return;
+  if (!goneData) return;
 
-  // Group by product
-  const byProduct: Record<string, number[]> = {};
-  for (const p of products) {
-    const name = p.parsed_product as string;
-    if (!byProduct[name]) byProduct[name] = [];
-    byProduct[name].push(p.days_active as number);
+  // Group by product_id
+  const byProduct: Record<number, number[]> = {};
+  for (const row of goneData) {
+    const pid = row.product_id as number;
+    if (!byProduct[pid]) byProduct[pid] = [];
+    byProduct[pid].push(row.days_active as number);
   }
 
-  // Update product intel for products with 3+ data points
-  for (const [productName, days] of Object.entries(byProduct)) {
+  for (const [productId, days] of Object.entries(byProduct)) {
     if (days.length < 3) continue;
 
     days.sort((a, b) => a - b);
     const mid = Math.floor(days.length / 2);
     const median = days.length % 2 === 0 ? (days[mid - 1] + days[mid]) / 2 : days[mid];
 
-    // Infer difficulty from time to sell
-    let difficulty: 'easy' | 'moderate' | 'hard';
-    if (median <= 3) difficulty = 'easy';
-    else if (median <= 7) difficulty = 'moderate';
-    else difficulty = 'hard';
+    let sellVelocity: 'fast' | 'moderate' | 'slow';
+    if (median <= 3) sellVelocity = 'fast';
+    else if (median <= 7) sellVelocity = 'moderate';
+    else sellVelocity = 'slow';
 
-    // Upsert into product_intel — only update difficulty if not manually set
-    const { data: existing } = await supabase
-      .from('stc_product_intel')
-      .select('id, difficulty')
-      .eq('product_name', productName)
-      .limit(1);
+    let easeRating: 'easy' | 'moderate' | 'hard';
+    if (median <= 3) easeRating = 'easy';
+    else if (median <= 7) easeRating = 'moderate';
+    else easeRating = 'hard';
 
-    if (existing && existing.length > 0) {
-      // Only update if difficulty was auto-set (not manually overridden)
-      // We'll use a simple heuristic: update if notes don't mention manual
-      await supabase
-        .from('stc_product_intel')
-        .update({
-          difficulty,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', existing[0].id)
-        .is('notes', null); // Only auto-update if no manual notes
-    }
+    await supabase
+      .from('stc_products')
+      .update({
+        avg_days_to_sell: Math.round(median * 10) / 10,
+        sell_velocity: sellVelocity,
+        ease_rating: easeRating,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', parseInt(productId))
+      .eq('status', 'active');
+
+    console.log(`  Product #${productId}: median ${median.toFixed(1)} days → ${sellVelocity}`);
   }
 }
 
 async function monitorListings(): Promise<void> {
   console.log(`[${new Date().toISOString()}] Listing monitor starting...`);
 
-  // Get active listings that haven't been marked as gone
   const { data: listings, error } = await supabase
     .from('stc_listings')
-    .select('id, source, listing_url, first_seen_at, created_at, parsed_product, parsed_category')
+    .select('id, source, listing_url, first_seen_at, created_at, parsed_product, product_id')
     .in('status', ['new', 'contacted'])
     .is('gone_at', null)
     .not('listing_url', 'is', null)
@@ -234,7 +175,7 @@ async function monitorListings(): Promise<void> {
 
   if (!listings || listings.length === 0) {
     console.log('No listings to check');
-    await updateCategoryStats();
+    await updateProductStats();
     return;
   }
 
@@ -255,7 +196,6 @@ async function monitorListings(): Promise<void> {
       const now = new Date().toISOString();
 
       if (isLive) {
-        // Still live — update last_seen_at
         await supabase
           .from('stc_listings')
           .update({
@@ -265,7 +205,6 @@ async function monitorListings(): Promise<void> {
           .eq('id', listing.id);
         stillLive++;
       } else {
-        // Gone — calculate days active
         const firstSeen = new Date(listing.first_seen_at || listing.created_at);
         const daysActive = Math.max(1, Math.round((Date.now() - firstSeen.getTime()) / (1000 * 60 * 60 * 24)));
 
@@ -283,7 +222,6 @@ async function monitorListings(): Promise<void> {
         gone++;
       }
 
-      // Rate limit between checks
       await sleep(DELAY_MS);
     } catch (err) {
       console.error(`  Error checking listing ${listing.id}:`, err);
@@ -293,9 +231,7 @@ async function monitorListings(): Promise<void> {
 
   console.log(`Results: ${stillLive} live, ${gone} gone, ${errors} errors`);
 
-  // Update category and product stats with new data
-  await updateCategoryStats();
-  await updateProductIntel();
+  await updateProductStats();
 
   console.log(`[${new Date().toISOString()}] Monitor complete`);
 }

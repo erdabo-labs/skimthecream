@@ -1,142 +1,245 @@
 "use client";
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { createBrowserClient } from '@/lib/supabase/client';
-import type { ProductIntel } from '@/lib/types';
+import type { Product, BrandRule } from '@/lib/types';
+import { cleanDescription } from '@/lib/utils';
 
-interface ProductSummary {
-  name: string;
-  category: string | null;
-  listings: number;
-  prices: number[];
-  storages: string[];
-  lastSeen: string;
-  lowPrice: number;
-  highPrice: number;
-  avgPrice: number;
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const hours = Math.floor(diff / (1000 * 60 * 60));
+  if (hours < 1) return '<1h';
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
+function confidenceBadge(confidence: string) {
+  const styles: Record<string, string> = {
+    low: 'bg-zinc-700/50 text-zinc-400',
+    medium: 'bg-yellow-500/20 text-yellow-400',
+    high: 'bg-emerald-500/20 text-emerald-400',
+    very_high: 'bg-emerald-500/30 text-emerald-300',
+  };
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded ${styles[confidence] ?? styles.low}`}>
+      {confidence === 'very_high' ? 'very high' : confidence}
+    </span>
+  );
+}
+
+function velocityBadge(velocity: string | null) {
+  if (!velocity) return null;
+  const styles: Record<string, string> = {
+    fast: 'bg-emerald-500/20 text-emerald-400',
+    moderate: 'bg-yellow-500/20 text-yellow-400',
+    slow: 'bg-red-500/20 text-red-400',
+  };
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded ${styles[velocity] ?? ''}`}>
+      {velocity}
+    </span>
+  );
+}
+
+function easeBadge(ease: string | null) {
+  if (!ease) return null;
+  const styles: Record<string, string> = {
+    easy: 'bg-emerald-500/20 text-emerald-400',
+    moderate: 'bg-yellow-500/20 text-yellow-400',
+    hard: 'bg-red-500/20 text-red-400',
+  };
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded ${styles[ease] ?? ''}`}>
+      {ease}
+    </span>
+  );
 }
 
 export function ProductsClient({
-  products: initial,
-  intel: initialIntel,
+  pending: initialPending,
+  active: initialActive,
+  inactive: initialInactive,
+  brandRules: initialRules,
 }: {
-  products: ProductSummary[];
-  intel: ProductIntel[];
+  pending: Product[];
+  active: Product[];
+  inactive: Product[];
+  brandRules: BrandRule[];
 }) {
-  const [products] = useState(initial);
-  const [intel, setIntel] = useState(initialIntel);
+  const [pending, setPending] = useState(initialPending);
+  const [active, setActive] = useState(initialActive);
+  const [inactive, setInactive] = useState(initialInactive);
+  const [brandRules, setBrandRules] = useState(initialRules);
   const [search, setSearch] = useState('');
-  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
-  const [editingProduct, setEditingProduct] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState({
-    notes: '',
-    difficulty: '' as string,
-    price_floor: '',
-    price_ceiling: '',
-    tags: '',
-  });
+  const [expandedProduct, setExpandedProduct] = useState<number | null>(null);
+  const [editingProduct, setEditingProduct] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState({ notes: '', target_buy_price: '' });
+  const [showInactive, setShowInactive] = useState(false);
+  const [showRules, setShowRules] = useState(false);
+  const [editingRule, setEditingRule] = useState<number | null>(null);
+  const [ruleForm, setRuleForm] = useState({ brand: '', max_age_years: '', auto_approve: false, notes: '' });
+  const [showAddRule, setShowAddRule] = useState(false);
+  const [expandedPending, setExpandedPending] = useState<number | null>(null);
+  const [pendingListings, setPendingListings] = useState<Record<number, any[]>>({});
+  const [loadingListings, setLoadingListings] = useState<number | null>(null);
 
   const supabase = createBrowserClient();
 
-  const filtered = search
-    ? products.filter(
-        (p) =>
-          p.name.toLowerCase().includes(search.toLowerCase()) ||
-          (p.category ?? '').toLowerCase().includes(search.toLowerCase())
-      )
-    : products;
+  async function togglePendingListings(productId: number) {
+    if (expandedPending === productId) {
+      setExpandedPending(null);
+      return;
+    }
+    setExpandedPending(productId);
+    if (pendingListings[productId]) return; // Already loaded
 
-  // Group by category
-  const grouped: Record<string, ProductSummary[]> = {};
-  for (const p of filtered) {
-    const cat = p.category ?? 'uncategorized';
-    if (!grouped[cat]) grouped[cat] = [];
-    grouped[cat].push(p);
-  }
-  // Sort products within each category by listing count
-  for (const cat of Object.keys(grouped)) {
-    grouped[cat].sort((a, b) => b.listings - a.listings);
-  }
-  // Sort categories by total listings
-  const sortedCategories = Object.entries(grouped).sort(
-    ([, a], [, b]) => b.reduce((s, p) => s + p.listings, 0) - a.reduce((s, p) => s + p.listings, 0)
-  );
-
-  function toggleCategory(cat: string) {
-    setCollapsedCategories(prev => {
-      const next = new Set(prev);
-      if (next.has(cat)) next.delete(cat);
-      else next.add(cat);
-      return next;
-    });
+    setLoadingListings(productId);
+    const { data } = await supabase
+      .from('stc_listings')
+      .select('id, title, asking_price, source, listing_url, parsed_storage, parsed_condition, raw_email_snippet, created_at')
+      .eq('product_id', productId)
+      .order('created_at', { ascending: false })
+      .limit(10);
+    setPendingListings(prev => ({ ...prev, [productId]: data ?? [] }));
+    setLoadingListings(null);
   }
 
-  function getIntel(productName: string): ProductIntel | undefined {
-    return intel.find((i) => i.product_name === productName);
+  async function rescoreListing(listingId: number, productId: number) {
+    // Unlink from product, clear score — scorer will re-analyze it fresh
+    await supabase.from('stc_listings').update({
+      product_id: null,
+      score: null,
+      estimated_profit: null,
+      parsed_product: null,
+      parsed_condition: null,
+      parsed_storage: null,
+      price_source: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', listingId);
+    // Remove from local state
+    setPendingListings(prev => ({
+      ...prev,
+      [productId]: (prev[productId] ?? []).filter(l => l.id !== listingId),
+    }));
   }
 
-  function startEdit(productName: string) {
-    const existing = getIntel(productName);
+  async function dismissListing(listingId: number, productId: number) {
+    await supabase.from('stc_listings').update({
+      status: 'dismissed',
+      feedback: 'wrong_product',
+      feedback_note: 'removed from product',
+      updated_at: new Date().toISOString(),
+    }).eq('id', listingId);
+    setPendingListings(prev => ({
+      ...prev,
+      [productId]: (prev[productId] ?? []).filter(l => l.id !== listingId),
+    }));
+  }
+
+  function filterProducts(products: Product[]): Product[] {
+    if (!search) return products;
+    const q = search.toLowerCase();
+    return products.filter(p =>
+      p.canonical_name.toLowerCase().includes(q) ||
+      (p.brand?.toLowerCase().includes(q) ?? false) ||
+      (p.model_line?.toLowerCase().includes(q) ?? false)
+    );
+  }
+
+  async function approveProduct(product: Product) {
+    await supabase
+      .from('stc_products')
+      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .eq('id', product.id);
+    setPending(prev => prev.filter(p => p.id !== product.id));
+    setActive(prev => [...prev, { ...product, status: 'active' as const }].sort((a, b) => a.canonical_name.localeCompare(b.canonical_name)));
+  }
+
+  async function rejectProduct(product: Product) {
+    await supabase
+      .from('stc_products')
+      .update({ status: 'inactive', updated_at: new Date().toISOString() })
+      .eq('id', product.id);
+    setPending(prev => prev.filter(p => p.id !== product.id));
+    setInactive(prev => [...prev, { ...product, status: 'inactive' as const }].sort((a, b) => a.canonical_name.localeCompare(b.canonical_name)));
+  }
+
+  async function approveAll() {
+    const ids = filterProducts(pending).map(p => p.id);
+    if (ids.length === 0) return;
+    await supabase
+      .from('stc_products')
+      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .in('id', ids);
+    const approved = pending.filter(p => ids.includes(p.id));
+    setPending(prev => prev.filter(p => !ids.includes(p.id)));
+    setActive(prev => [...prev, ...approved.map(p => ({ ...p, status: 'active' as const }))].sort((a, b) => a.canonical_name.localeCompare(b.canonical_name)));
+  }
+
+  async function rejectAll() {
+    const ids = filterProducts(pending).map(p => p.id);
+    if (ids.length === 0) return;
+    await supabase
+      .from('stc_products')
+      .update({ status: 'inactive', updated_at: new Date().toISOString() })
+      .in('id', ids);
+    const rejected = pending.filter(p => ids.includes(p.id));
+    setPending(prev => prev.filter(p => !ids.includes(p.id)));
+    setInactive(prev => [...prev, ...rejected.map(p => ({ ...p, status: 'inactive' as const }))].sort((a, b) => a.canonical_name.localeCompare(b.canonical_name)));
+  }
+
+  async function deactivateProduct(product: Product) {
+    await supabase
+      .from('stc_products')
+      .update({ status: 'inactive', updated_at: new Date().toISOString() })
+      .eq('id', product.id);
+    setActive(prev => prev.filter(p => p.id !== product.id));
+    setInactive(prev => [...prev, { ...product, status: 'inactive' as const }].sort((a, b) => a.canonical_name.localeCompare(b.canonical_name)));
+  }
+
+  async function reactivateProduct(product: Product) {
+    await supabase
+      .from('stc_products')
+      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .eq('id', product.id);
+    setInactive(prev => prev.filter(p => p.id !== product.id));
+    setActive(prev => [...prev, { ...product, status: 'active' as const }].sort((a, b) => a.canonical_name.localeCompare(b.canonical_name)));
+  }
+
+  function startEdit(product: Product) {
     setEditForm({
-      notes: existing?.notes ?? '',
-      difficulty: existing?.difficulty ?? '',
-      price_floor: existing?.price_floor?.toString() ?? '',
-      price_ceiling: existing?.price_ceiling?.toString() ?? '',
-      tags: existing?.tags?.join(', ') ?? '',
+      notes: product.notes ?? '',
+      target_buy_price: product.target_buy_price?.toString() ?? '',
     });
-    setEditingProduct(productName);
+    setEditingProduct(product.id);
   }
 
-  async function saveIntel(productName: string, category: string | null) {
-    const data: Record<string, unknown> = {
-      product_name: productName,
-      category,
+  async function saveEdit(productId: number) {
+    const updates: Record<string, any> = {
       notes: editForm.notes || null,
-      difficulty: editForm.difficulty || null,
-      price_floor: editForm.price_floor ? parseFloat(editForm.price_floor) : null,
-      price_ceiling: editForm.price_ceiling ? parseFloat(editForm.price_ceiling) : null,
-      tags: editForm.tags
-        ? editForm.tags.split(',').map((t) => t.trim()).filter(Boolean)
-        : [],
       updated_at: new Date().toISOString(),
     };
-
-    const { data: result, error } = await supabase
-      .from('stc_product_intel')
-      .upsert(data, { onConflict: 'product_name' })
-      .select()
-      .single();
-
-    if (!error && result) {
-      setIntel((prev) => {
-        const existing = prev.findIndex((i) => i.product_name === productName);
-        if (existing >= 0) {
-          const updated = [...prev];
-          updated[existing] = result;
-          return updated;
-        }
-        return [...prev, result];
-      });
+    if (editForm.target_buy_price) {
+      updates.target_buy_price = parseFloat(editForm.target_buy_price);
     }
-
+    await supabase.from('stc_products').update(updates).eq('id', productId);
+    setActive(prev => prev.map(p =>
+      p.id === productId
+        ? { ...p, notes: updates.notes, target_buy_price: updates.target_buy_price ?? p.target_buy_price }
+        : p
+    ));
     setEditingProduct(null);
   }
 
-  function timeAgo(dateStr: string): string {
-    const diff = Date.now() - new Date(dateStr).getTime();
-    const hours = Math.floor(diff / (1000 * 60 * 60));
-    if (hours < 1) return '<1h';
-    if (hours < 24) return `${hours}h`;
-    const days = Math.floor(hours / 24);
-    return `${days}d`;
-  }
+  const filteredPending = filterProducts(pending);
+  const filteredActive = filterProducts(active);
+  const filteredInactive = filterProducts(inactive);
 
   return (
-    <div className="p-4 space-y-4">
+    <div className="p-4 space-y-6">
       <h1 className="text-2xl font-bold">Products</h1>
-      <p className="text-xs text-zinc-500">
-        Identified products from listings. Tap to add pricing context and rules.
-      </p>
 
       <input
         type="text"
@@ -146,252 +249,543 @@ export function ProductsClient({
         className="w-full bg-zinc-900 rounded-lg px-3 py-2 text-sm border border-zinc-800 focus:border-emerald-500 focus:outline-none"
       />
 
-      <div className="space-y-4">
-        {sortedCategories.map(([category, categoryProducts]) => {
-          const isCollapsed = collapsedCategories.has(category);
-          const totalListings = categoryProducts.reduce((s, p) => s + p.listings, 0);
-
-          return (
-            <div key={category}>
+      {/* Pending Review */}
+      {filteredPending.length > 0 && (
+        <section>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-sm font-semibold text-amber-400 uppercase tracking-wider">
+              Pending Review ({filteredPending.length})
+            </h2>
+            <div className="flex gap-1.5">
               <button
-                onClick={() => toggleCategory(category)}
-                className="flex items-center justify-between w-full text-left py-2 px-1"
+                onClick={approveAll}
+                className="text-[10px] px-2.5 py-1 rounded bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 transition-colors"
               >
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-zinc-500">{isCollapsed ? '▸' : '▾'}</span>
-                  <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wide">
-                    {category}
-                  </h2>
-                  <span className="text-[10px] text-zinc-600">
-                    {categoryProducts.length} products &middot; {totalListings} listings
-                  </span>
-                </div>
+                Approve All
               </button>
+              <button
+                onClick={rejectAll}
+                className="text-[10px] px-2.5 py-1 rounded bg-zinc-800 text-zinc-500 hover:bg-zinc-700 transition-colors"
+              >
+                Reject All
+              </button>
+            </div>
+          </div>
+          <div className="space-y-2">
+            {filteredPending.map((product) => {
+              const isOpen = expandedPending === product.id;
+              const listings = pendingListings[product.id] ?? [];
+              const isLoading = loadingListings === product.id;
 
-              {!isCollapsed && (
-                <div className="space-y-2">
-                  {categoryProducts.map((product) => {
-          const pi = getIntel(product.name);
-          const isEditing = editingProduct === product.name;
-
-          return (
-            <div
-              key={product.name}
-              className="bg-zinc-900 rounded-xl p-4 border border-zinc-800"
-            >
-              <div className="flex justify-between items-start">
-                <div className="min-w-0 flex-1">
-                  <h3 className="font-medium text-sm">{product.name}</h3>
-                  <div className="flex gap-2 items-center mt-0.5 flex-wrap">
-                    {product.category && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700/50 text-zinc-400">
-                        {product.category}
-                      </span>
-                    )}
-                    {pi?.difficulty && (
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded ${
-                          pi.difficulty === 'easy'
-                            ? 'bg-emerald-500/20 text-emerald-400'
-                            : pi.difficulty === 'hard'
-                              ? 'bg-red-500/20 text-red-400'
-                              : 'bg-yellow-500/20 text-yellow-400'
-                        }`}
-                      >
-                        {pi.difficulty}
-                      </span>
-                    )}
-                    {pi?.tags?.map((tag) => (
-                      <span
-                        key={tag}
-                        className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                <button
-                  onClick={() => (isEditing ? setEditingProduct(null) : startEdit(product.name))}
-                  className="text-[10px] px-2 py-1 rounded bg-zinc-800 text-zinc-400 hover:text-white transition-colors shrink-0 ml-2"
+              return (
+                <div
+                  key={product.id}
+                  className="bg-zinc-900 rounded-xl p-4 border border-amber-500/20"
                 >
-                  {isEditing ? 'Close' : 'Edit'}
-                </button>
-              </div>
-
-              {/* Price stats */}
-              <div className="flex gap-4 mt-2 text-sm">
-                <div>
-                  <p className="text-zinc-500 text-xs">Seen</p>
-                  <p className="font-semibold">
-                    {product.listings}x
-                    <span className="text-zinc-500 font-normal text-xs ml-1">
-                      {timeAgo(product.lastSeen)} ago
-                    </span>
-                  </p>
-                </div>
-                <div>
-                  <p className="text-zinc-500 text-xs">Range</p>
-                  <p className="font-semibold">
-                    ${product.lowPrice}–${product.highPrice}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-zinc-500 text-xs">Avg</p>
-                  <p className="font-semibold">${product.avgPrice}</p>
-                </div>
-                {product.storages.length > 0 && (
-                  <div>
-                    <p className="text-zinc-500 text-xs">Storage</p>
-                    <p className="font-semibold text-xs">
-                      {product.storages.join(', ')}
-                    </p>
+                  <div className="flex justify-between items-start gap-2">
+                    <button
+                      onClick={() => togglePendingListings(product.id)}
+                      className="min-w-0 text-left"
+                    >
+                      <h3 className="font-medium text-sm">{product.canonical_name}</h3>
+                      <p className="text-xs text-zinc-500 mt-0.5">
+                        {product.brand && <span>{product.brand} &middot; </span>}
+                        First seen {timeAgo(product.first_seen_at)} ago &middot; {product.listing_count} listing{product.listing_count !== 1 ? 's' : ''}
+                        <span className="text-zinc-600 ml-1">{isOpen ? '▾' : '▸'}</span>
+                      </p>
+                    </button>
+                    <div className="flex gap-1.5 shrink-0">
+                      <button
+                        onClick={() => approveProduct(product)}
+                        className="text-xs px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
+                      >
+                        Track
+                      </button>
+                      <button
+                        onClick={() => rejectProduct(product)}
+                        className="text-xs px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-500 hover:bg-zinc-700 transition-colors"
+                      >
+                        Skip
+                      </button>
+                    </div>
                   </div>
-                )}
-              </div>
 
-              {/* User ceiling/floor */}
-              {pi && (pi.price_ceiling || pi.price_floor) && !isEditing && (
-                <div className="flex gap-4 mt-1 text-sm">
-                  {pi.price_ceiling && (
-                    <div>
-                      <p className="text-zinc-500 text-xs">Worth (yours)</p>
-                      <p className="font-semibold text-emerald-400">${pi.price_ceiling}</p>
+                  {isOpen && (
+                    <div className="mt-3 border-t border-zinc-800 pt-2 space-y-1.5">
+                      {isLoading ? (
+                        <p className="text-xs text-zinc-600 py-2">Loading listings...</p>
+                      ) : listings.length === 0 ? (
+                        <p className="text-xs text-zinc-600 py-2">No listings found</p>
+                      ) : (
+                        listings.map((l: any) => (
+                          <div key={l.id} className="py-1.5 border-b border-zinc-800/50 last:border-0">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="text-xs text-zinc-300 truncate">{l.title}</p>
+                                <p className="text-[10px] text-zinc-600">
+                                  {l.source === 'facebook' ? 'FB' : 'KSL'}
+                                  {l.asking_price ? ` · $${l.asking_price}` : ''}
+                                  {l.parsed_storage ? ` · ${l.parsed_storage}` : ''}
+                                  {l.parsed_condition ? ` · ${l.parsed_condition}` : ''}
+                                  {` · ${timeAgo(l.created_at)} ago`}
+                                </p>
+                              </div>
+                              <div className="flex gap-1.5 shrink-0">
+                                {l.listing_url && (
+                                  <a
+                                    href={l.listing_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-[10px] text-blue-400"
+                                  >
+                                    View
+                                  </a>
+                                )}
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); rescoreListing(l.id, product.id); }}
+                                  className="text-[10px] text-amber-400/70 hover:text-amber-400"
+                                  title="Unlink and re-score"
+                                >
+                                  Rescore
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); dismissListing(l.id, product.id); }}
+                                  className="text-[10px] text-zinc-600 hover:text-red-400"
+                                  title="Dismiss listing"
+                                >
+                                  Dismiss
+                                </button>
+                              </div>
+                            </div>
+                            {l.raw_email_snippet && (() => {
+                              const desc = cleanDescription(l.raw_email_snippet);
+                              return desc ? (
+                                <p className="text-[10px] text-zinc-500 mt-1 leading-relaxed whitespace-pre-line">{desc}</p>
+                              ) : null;
+                            })()}
+                          </div>
+                        ))
+                      )}
                     </div>
                   )}
-                  {pi.price_floor && (
-                    <div>
-                      <p className="text-zinc-500 text-xs">Max Buy</p>
-                      <p className="font-semibold text-yellow-400">${pi.price_floor}</p>
-                    </div>
-                  )}
                 </div>
-              )}
+              );
+            })}
+          </div>
+        </section>
+      )}
 
-              {/* Notes */}
-              {pi?.notes && !isEditing && (
-                <p className="text-xs text-zinc-400 mt-2 italic">{pi.notes}</p>
-              )}
+      {/* Active Products */}
+      <section>
+        <h2 className="text-sm font-semibold text-emerald-400 uppercase tracking-wider mb-2">
+          Active ({filteredActive.length})
+        </h2>
+        {filteredActive.length === 0 ? (
+          <p className="text-zinc-500 text-xs text-center py-6">
+            No active products yet. Approve pending products to start tracking.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {filteredActive.map((product) => {
+              const isExpanded = expandedProduct === product.id;
+              const isEditing = editingProduct === product.id;
 
-              {/* Edit form */}
-              {isEditing && (
-                <div className="mt-3 space-y-2 border-t border-zinc-800 pt-3">
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[10px] text-zinc-500 block mb-0.5">
-                        Worth (market value)
-                      </label>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        value={editForm.price_ceiling}
-                        onChange={(e) =>
-                          setEditForm({ ...editForm, price_ceiling: e.target.value })
-                        }
-                        className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
-                        placeholder="e.g. 400"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-zinc-500 block mb-0.5">
-                        Max buy price
-                      </label>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        value={editForm.price_floor}
-                        onChange={(e) =>
-                          setEditForm({ ...editForm, price_floor: e.target.value })
-                        }
-                        className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
-                        placeholder="e.g. 250"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] text-zinc-500 block mb-0.5">
-                      Difficulty
-                    </label>
-                    <div className="flex gap-1">
-                      {(['easy', 'moderate', 'hard'] as const).map((d) => (
-                        <button
-                          key={d}
-                          onClick={() =>
-                            setEditForm({
-                              ...editForm,
-                              difficulty: editForm.difficulty === d ? '' : d,
-                            })
-                          }
-                          className={`text-[10px] px-2.5 py-1.5 rounded transition-colors ${
-                            editForm.difficulty === d
-                              ? d === 'easy'
-                                ? 'bg-emerald-500/30 text-emerald-400'
-                                : d === 'hard'
-                                  ? 'bg-red-500/30 text-red-400'
-                                  : 'bg-yellow-500/30 text-yellow-400'
-                              : 'bg-zinc-800 text-zinc-500'
-                          }`}
-                        >
-                          {d}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] text-zinc-500 block mb-0.5">
-                      Notes (scoring context, battery info, etc.)
-                    </label>
-                    <textarea
-                      value={editForm.notes}
-                      onChange={(e) =>
-                        setEditForm({ ...editForm, notes: e.target.value })
-                      }
-                      className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none resize-none"
-                      rows={2}
-                      placeholder="e.g. Battery health matters. 80%+ adds $50. Hard to sell under 256GB."
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] text-zinc-500 block mb-0.5">
-                      Tags (comma-separated)
-                    </label>
-                    <input
-                      type="text"
-                      value={editForm.tags}
-                      onChange={(e) =>
-                        setEditForm({ ...editForm, tags: e.target.value })
-                      }
-                      className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
-                      placeholder="e.g. trending down, seasonal, fast flip"
-                    />
-                  </div>
-
+              return (
+                <div
+                  key={product.id}
+                  className="bg-zinc-900 rounded-xl p-4 border border-zinc-800"
+                >
                   <button
-                    onClick={() => saveIntel(product.name, product.category)}
-                    className="w-full text-xs py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
+                    onClick={() => setExpandedProduct(isExpanded ? null : product.id)}
+                    className="w-full text-left"
                   >
-                    Save
+                    <div className="flex justify-between items-start gap-2">
+                      <div className="min-w-0">
+                        <Link href={`/products/${product.id}`} onClick={(e) => e.stopPropagation()} className="font-medium text-sm hover:text-emerald-400 transition-colors">{product.canonical_name}</Link>
+                        <div className="flex gap-1.5 items-center mt-1 flex-wrap">
+                          {confidenceBadge(product.confidence)}
+                          {velocityBadge(product.sell_velocity)}
+                          {easeBadge(product.ease_rating)}
+                          <span className="text-[10px] text-zinc-600">
+                            {product.listing_count} listing{product.listing_count !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        {product.target_buy_price ? (
+                          <div>
+                            <p className="text-[10px] text-zinc-500">Buy below</p>
+                            <p className="font-bold text-emerald-400">${product.target_buy_price}</p>
+                          </div>
+                        ) : (
+                          <p className="text-[10px] text-zinc-600">No target yet</p>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+
+                  {isExpanded && (
+                    <div className="mt-3 border-t border-zinc-800 pt-3 space-y-3">
+                      {/* Pricing details */}
+                      <div className="grid grid-cols-4 gap-2 text-center">
+                        <div>
+                          <p className="text-[10px] text-zinc-500">Low</p>
+                          <p className="text-xs font-semibold">{product.low_price ? `$${product.low_price}` : '—'}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-zinc-500">Median</p>
+                          <p className="text-xs font-semibold">{product.median_asking_price ? `$${product.median_asking_price}` : '—'}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-zinc-500">High</p>
+                          <p className="text-xs font-semibold">{product.high_price ? `$${product.high_price}` : '—'}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-zinc-500">AI Value</p>
+                          <p className="text-xs font-semibold">{product.ai_market_value ? `$${product.ai_market_value}` : '—'}</p>
+                        </div>
+                      </div>
+
+                      {/* Sell stats */}
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <div>
+                          <p className="text-[10px] text-zinc-500">Avg Days</p>
+                          <p className="text-xs font-semibold">{product.avg_days_to_sell ?? '—'}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-zinc-500">Sold</p>
+                          <p className="text-xs font-semibold">{product.times_sold}x</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-zinc-500">Avg Profit</p>
+                          <p className={`text-xs font-semibold ${(product.avg_profit ?? 0) > 0 ? 'text-emerald-400' : ''}`}>
+                            {product.avg_profit ? `$${product.avg_profit}` : '—'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Last refreshed */}
+                      {product.last_refreshed && (
+                        <p className="text-[10px] text-zinc-600">
+                          Intelligence updated {timeAgo(product.last_refreshed)} ago
+                        </p>
+                      )}
+
+                      {/* Notes */}
+                      {product.notes && !isEditing && (
+                        <p className="text-xs text-zinc-400 italic">{product.notes}</p>
+                      )}
+
+                      {/* Edit form */}
+                      {isEditing ? (
+                        <div className="space-y-2">
+                          <div>
+                            <label className="text-[10px] text-zinc-500 block mb-0.5">Target Buy Price</label>
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              value={editForm.target_buy_price}
+                              onChange={(e) => setEditForm({ ...editForm, target_buy_price: e.target.value })}
+                              className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                              placeholder="e.g. 350"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-zinc-500 block mb-0.5">Notes</label>
+                            <textarea
+                              value={editForm.notes}
+                              onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })}
+                              className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none resize-none"
+                              rows={2}
+                              placeholder="e.g. Battery health matters. 80%+ adds $50."
+                            />
+                          </div>
+                          <div className="flex gap-1.5">
+                            <button
+                              onClick={() => saveEdit(product.id)}
+                              className="flex-1 text-xs py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors font-medium"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={() => setEditingProduct(null)}
+                              className="text-xs px-3 py-2 rounded-lg bg-zinc-800 text-zinc-500 hover:bg-zinc-700 transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex gap-1.5">
+                          <button
+                            onClick={() => startEdit(product)}
+                            className="flex-1 text-xs py-2 rounded-lg bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => deactivateProduct(product)}
+                            className="text-xs px-3 py-2 rounded-lg bg-zinc-800 text-red-400/60 hover:bg-zinc-700 transition-colors"
+                          >
+                            Deactivate
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* Inactive Products */}
+      {filteredInactive.length > 0 && (
+        <section>
+          <button
+            onClick={() => setShowInactive(!showInactive)}
+            className="flex items-center gap-2 text-sm font-semibold text-zinc-500 uppercase tracking-wider mb-2"
+          >
+            <span className="text-xs">{showInactive ? '▾' : '▸'}</span>
+            Inactive ({filteredInactive.length})
+          </button>
+          {showInactive && (
+            <div className="space-y-1">
+              {filteredInactive.map((product) => (
+                <div
+                  key={product.id}
+                  className="flex items-center justify-between bg-zinc-900/50 rounded-lg px-3 py-2 border border-zinc-800/50"
+                >
+                  <span className="text-xs text-zinc-500">{product.canonical_name}</span>
+                  <button
+                    onClick={() => reactivateProduct(product)}
+                    className="text-[10px] px-2.5 py-1 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
+                  >
+                    Reactivate
                   </button>
                 </div>
-              )}
+              ))}
             </div>
-          );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {sortedCategories.length === 0 && (
-        <p className="text-zinc-500 text-sm text-center py-8">
-          No products identified yet. Listings will appear here once processed.
-        </p>
+          )}
+        </section>
       )}
+
+      {/* Brand Rules */}
+      <section>
+        <button
+          onClick={() => setShowRules(!showRules)}
+          className="flex items-center gap-2 text-sm font-semibold text-zinc-500 uppercase tracking-wider mb-2"
+        >
+          <span className="text-xs">{showRules ? '▾' : '▸'}</span>
+          Brand Rules ({brandRules.length})
+        </button>
+        {showRules && (
+          <div className="space-y-2">
+            {brandRules.map((rule) => {
+              const isEditing = editingRule === rule.id;
+              return (
+                <div key={rule.id} className="bg-zinc-900 rounded-xl p-3 border border-zinc-800">
+                  {isEditing ? (
+                    <div className="space-y-2">
+                      <input
+                        type="text"
+                        value={ruleForm.brand}
+                        onChange={(e) => setRuleForm({ ...ruleForm, brand: e.target.value })}
+                        className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                        placeholder="Brand name"
+                      />
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] text-zinc-500 block mb-0.5">Max age (years)</label>
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            value={ruleForm.max_age_years}
+                            onChange={(e) => setRuleForm({ ...ruleForm, max_age_years: e.target.value })}
+                            className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                            placeholder="e.g. 5 (blank = no limit)"
+                          />
+                        </div>
+                        <div className="flex items-end pb-1">
+                          <label className="flex items-center gap-1.5 text-xs text-zinc-400">
+                            <input
+                              type="checkbox"
+                              checked={ruleForm.auto_approve}
+                              onChange={(e) => setRuleForm({ ...ruleForm, auto_approve: e.target.checked })}
+                              className="rounded"
+                            />
+                            Auto-approve
+                          </label>
+                        </div>
+                      </div>
+                      <input
+                        type="text"
+                        value={ruleForm.notes}
+                        onChange={(e) => setRuleForm({ ...ruleForm, notes: e.target.value })}
+                        className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                        placeholder="Notes (optional)"
+                      />
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={async () => {
+                            await supabase.from('stc_brand_rules').update({
+                              brand: ruleForm.brand,
+                              max_age_years: ruleForm.max_age_years ? parseInt(ruleForm.max_age_years) : null,
+                              auto_approve: ruleForm.auto_approve,
+                              notes: ruleForm.notes || null,
+                              updated_at: new Date().toISOString(),
+                            }).eq('id', rule.id);
+                            setBrandRules(prev => prev.map(r => r.id === rule.id ? {
+                              ...r,
+                              brand: ruleForm.brand,
+                              max_age_years: ruleForm.max_age_years ? parseInt(ruleForm.max_age_years) : null,
+                              auto_approve: ruleForm.auto_approve,
+                              notes: ruleForm.notes || null,
+                            } : r));
+                            setEditingRule(null);
+                          }}
+                          className="flex-1 text-xs py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setEditingRule(null)}
+                          className="text-xs px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-500 hover:bg-zinc-700 transition-colors"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={async () => {
+                            await supabase.from('stc_brand_rules').delete().eq('id', rule.id);
+                            setBrandRules(prev => prev.filter(r => r.id !== rule.id));
+                            setEditingRule(null);
+                          }}
+                          className="text-xs px-3 py-1.5 rounded-lg bg-zinc-800 text-red-400/60 hover:bg-zinc-700 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setRuleForm({
+                          brand: rule.brand,
+                          max_age_years: rule.max_age_years?.toString() ?? '',
+                          auto_approve: rule.auto_approve,
+                          notes: rule.notes ?? '',
+                        });
+                        setEditingRule(rule.id);
+                      }}
+                      className="w-full text-left"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium">{rule.brand}</span>
+                          {rule.max_age_years && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700/50 text-zinc-400">
+                              max {rule.max_age_years}yr
+                            </span>
+                          )}
+                          {rule.auto_approve && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">
+                              auto-approve
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-zinc-600">tap to edit</span>
+                      </div>
+                      {rule.notes && (
+                        <p className="text-[10px] text-zinc-500 mt-1">{rule.notes}</p>
+                      )}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Add new rule */}
+            {showAddRule ? (
+              <div className="bg-zinc-900 rounded-xl p-3 border border-emerald-500/20 space-y-2">
+                <input
+                  type="text"
+                  value={ruleForm.brand}
+                  onChange={(e) => setRuleForm({ ...ruleForm, brand: e.target.value })}
+                  className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                  placeholder="Brand name (e.g. Celestron)"
+                  autoFocus
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-zinc-500 block mb-0.5">Max age (years)</label>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      value={ruleForm.max_age_years}
+                      onChange={(e) => setRuleForm({ ...ruleForm, max_age_years: e.target.value })}
+                      className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                      placeholder="blank = no limit"
+                    />
+                  </div>
+                  <div className="flex items-end pb-1">
+                    <label className="flex items-center gap-1.5 text-xs text-zinc-400">
+                      <input
+                        type="checkbox"
+                        checked={ruleForm.auto_approve}
+                        onChange={(e) => setRuleForm({ ...ruleForm, auto_approve: e.target.checked })}
+                        className="rounded"
+                      />
+                      Auto-approve
+                    </label>
+                  </div>
+                </div>
+                <input
+                  type="text"
+                  value={ruleForm.notes}
+                  onChange={(e) => setRuleForm({ ...ruleForm, notes: e.target.value })}
+                  className="w-full bg-zinc-800 rounded px-2 py-1.5 text-xs border border-zinc-700 focus:border-emerald-500 focus:outline-none"
+                  placeholder="Notes (optional)"
+                />
+                <div className="flex gap-1.5">
+                  <button
+                    onClick={async () => {
+                      if (!ruleForm.brand.trim()) return;
+                      const { data, error } = await supabase.from('stc_brand_rules').insert({
+                        brand: ruleForm.brand.trim(),
+                        max_age_years: ruleForm.max_age_years ? parseInt(ruleForm.max_age_years) : null,
+                        auto_approve: ruleForm.auto_approve,
+                        notes: ruleForm.notes || null,
+                      }).select().single();
+                      if (!error && data) {
+                        setBrandRules(prev => [...prev, data].sort((a, b) => a.brand.localeCompare(b.brand)));
+                      }
+                      setRuleForm({ brand: '', max_age_years: '', auto_approve: false, notes: '' });
+                      setShowAddRule(false);
+                    }}
+                    className="flex-1 text-xs py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
+                  >
+                    Add Rule
+                  </button>
+                  <button
+                    onClick={() => { setShowAddRule(false); setRuleForm({ brand: '', max_age_years: '', auto_approve: false, notes: '' }); }}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-500 hover:bg-zinc-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setRuleForm({ brand: '', max_age_years: '', auto_approve: false, notes: '' }); setShowAddRule(true); }}
+                className="w-full text-xs py-2 rounded-lg border border-dashed border-zinc-700 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500 transition-colors"
+              >
+                + Add Brand Rule
+              </button>
+            )}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

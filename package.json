@@ -9,8 +9,8 @@
     "lint": "eslint",
     "build:services": "tsc -p tsconfig.services.json",
     "dev:email-watcher": "npx tsx services/email-watcher.ts",
-    "dev:price-scraper": "npx tsx services/price-scraper.ts",
     "dev:deal-scorer": "npx tsx services/deal-scorer.ts",
+    "dev:intelligence": "npx tsx services/intelligence.ts",
     "dev:listing-monitor": "npx tsx services/listing-monitor.ts",
     "services:install": "ln -sf $(pwd)/plists/com.skimthecream.*.plist ~/Library/LaunchAgents/"
   },

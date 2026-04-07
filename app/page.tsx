@@ -14,14 +14,14 @@ export default async function HomePage() {
     // Active conversations (contacted)
     supabase
       .from('stc_listings')
-      .select('id, title, asking_price, estimated_profit, score, source, listing_url, status, created_at, parsed_product, parsed_category, price_source, feedback')
+      .select('id, title, asking_price, estimated_profit, score, source, listing_url, status, created_at, parsed_product, parsed_category, price_source, feedback, product_id, raw_email_snippet')
       .eq('status', 'contacted')
       .order('updated_at', { ascending: false })
       .limit(10),
     // Hot deals (great + good, status new)
     supabase
       .from('stc_listings')
-      .select('id, title, asking_price, estimated_profit, score, source, listing_url, status, created_at, parsed_product, parsed_category, price_source, feedback')
+      .select('id, title, asking_price, estimated_profit, score, source, listing_url, status, created_at, parsed_product, parsed_category, price_source, feedback, product_id, raw_email_snippet')
       .eq('status', 'new')
       .in('score', ['great', 'good'])
       .order('estimated_profit', { ascending: false })
@@ -29,7 +29,7 @@ export default async function HomePage() {
     // All new listings (pass + unscored — hot deals are separate)
     supabase
       .from('stc_listings')
-      .select('id, title, asking_price, estimated_profit, score, source, listing_url, status, created_at, parsed_product, parsed_category, price_source, feedback')
+      .select('id, title, asking_price, estimated_profit, score, source, listing_url, status, created_at, parsed_product, parsed_category, price_source, feedback, product_id, raw_email_snippet')
       .eq('status', 'new')
       .or('score.eq.pass,score.is.null')
       .order('created_at', { ascending: false })
